@@ -10,7 +10,11 @@ import uvicorn
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
 
-from onyx.db.engine.sql_engine import get_session_with_current_tenant
+from onyx.configs.app_configs import (
+    POSTGRES_API_SERVER_POOL_OVERFLOW,
+    POSTGRES_API_SERVER_POOL_SIZE,
+)
+from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import hydrate_mattermost_listener_config
 from onyx.onyxbot.mattermost.client import MattermostClient
 from onyx.onyxbot.mattermost.config import (
@@ -108,6 +112,10 @@ async def _run_bot(
 
 
 def main() -> None:
+    SqlEngine.init_engine(
+        pool_size=POSTGRES_API_SERVER_POOL_SIZE,
+        max_overflow=POSTGRES_API_SERVER_POOL_OVERFLOW,
+    )
     config = load_mattermost_bot_config_from_env()
     logger.info("Starting Mattermost bot service", extra=redacted_mattermost_bot_env())
     uvicorn.run(get_application(config), host=config.host, port=config.port)
