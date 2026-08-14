@@ -252,7 +252,7 @@ def test_model_matches_migration_shape(db_session: Session) -> None:
 
 
 def test_migration_upgrade_and_downgrade() -> None:
-    _run_alembic("3350a25df58e", downgrade=True)
+    _run_alembic("f57f35403f6c", downgrade=True)
     with get_session_with_current_tenant() as db_session:
         if db_session.bind is None:
             raise RuntimeError("Database session is not bound")
