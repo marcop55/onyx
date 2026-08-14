@@ -19,7 +19,11 @@ def test_main_initializes_sql_engine_before_starting_uvicorn(monkeypatch: Any) -
     monkeypatch.setattr(run, "SqlEngine", FakeSqlEngine, raising=False)
     monkeypatch.setattr(run, "load_mattermost_bot_config_from_env", lambda: config)
     monkeypatch.setattr(run, "redacted_mattermost_bot_env", lambda: {})
-    monkeypatch.setattr(run, "get_application", lambda _config: app)
+    monkeypatch.setattr(
+        run,
+        "get_application",
+        lambda value: calls.append(("get_application", value)) or app,
+    )
     monkeypatch.setattr(
         run.uvicorn,
         "run",
@@ -36,5 +40,6 @@ def test_main_initializes_sql_engine_before_starting_uvicorn(monkeypatch: Any) -
                 run.POSTGRES_API_SERVER_POOL_OVERFLOW,
             ),
         ),
+        ("get_application", config),
         ("uvicorn", app),
     ]
