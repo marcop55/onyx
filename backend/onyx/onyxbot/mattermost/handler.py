@@ -13,6 +13,7 @@ from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
 from onyx.configs.constants import MessageType, QAFeedbackType
 from onyx.db.chat import get_chat_message
+from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.mattermost_bot import update_mattermost_thread_parent_message
 from onyx.db.models import ChatMessage
 from onyx.db.persona import get_persona_by_id
@@ -37,7 +38,9 @@ from onyx.onyxbot.mattermost.streaming import (
 from onyx.server.query_and_chat.models import MessageOrigin, SendMessageRequest
 from shared_configs.contextvars import CURRENT_USER_ID_CONTEXTVAR
 
-MATTERMOST_FAILURE_MESSAGE = "Onyx could not answer this Mattermost message. Try again later."
+MATTERMOST_FAILURE_MESSAGE = (
+    "Onyx could not answer this Mattermost message. Try again later."
+)
 MATTERMOST_PERSONA_ACCESS_DENIED_MESSAGE = "The configured Onyx agent is not available."
 
 
@@ -47,6 +50,10 @@ class MattermostHandlerConfig:
 
     persona_id: int
     onyx_user_id: UUID | None = None
+    mock_llm_response: str | None = None
+    owned_thread_root_ids: set[str] | None = None
+    owned_answer_post_root_ids: dict[str, str] | None = None
+    owned_answer_post_message_ids: dict[str, int] | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -66,10 +73,12 @@ async def handle_normalized_mattermost_event(
     """
 
     if event.event_type in {
-        MattermostNormalizedEventType.REACTION_FEEDBACK,
         MattermostNormalizedEventType.POST_DELETE_TOMBSTONE,
     }:
         return False
+
+    if event.event_type == MattermostNormalizedEventType.REACTION_FEEDBACK:
+        return _record_feedback_event(event=event, db_session=db_session)
 
     if not event.text.strip():
         return False
@@ -85,6 +94,7 @@ async def handle_normalized_mattermost_event(
             db_session=db_session,
             event=event,
             target=target,
+            config=config,
         )
         stream_result = await stream_mattermost_answer(
             client=client,
@@ -102,7 +112,9 @@ async def handle_normalized_mattermost_event(
     except MattermostStreamVisibleError:
         return True
     except Exception:
-        await _post_failure(client=client, event=event, message=MATTERMOST_FAILURE_MESSAGE)
+        await _post_failure(
+            client=client, event=event, message=MATTERMOST_FAILURE_MESSAGE
+        )
         return True
 
     update_mattermost_thread_parent_message(
@@ -110,7 +122,46 @@ async def handle_normalized_mattermost_event(
         mapping=target.mapping,
         parent_message_id=stream_result.message_id,
     )
+    _record_owned_answer(
+        config=config,
+        event=event,
+        answer_post_id=stream_result.post_id,
+        message_id=stream_result.message_id,
+    )
     return True
+
+
+def _record_feedback_event(
+    *,
+    event: NormalizedMattermostEvent,
+    db_session: Session,
+) -> bool:
+    if event.feedback_message_id is None or event.feedback_action is None:
+        return False
+
+    create_chat_message_feedback(
+        is_positive=event.feedback_action == QAFeedbackType.LIKE,
+        feedback_text=f"Mattermost feedback from {event.user_id}",
+        chat_message_id=event.feedback_message_id,
+        user_id=None,
+        db_session=db_session,
+    )
+    return True
+
+
+def _record_owned_answer(
+    *,
+    config: MattermostHandlerConfig,
+    event: NormalizedMattermostEvent,
+    answer_post_id: str,
+    message_id: int,
+) -> None:
+    if config.owned_thread_root_ids is not None:
+        config.owned_thread_root_ids.add(event.root_post_id)
+    if config.owned_answer_post_root_ids is not None:
+        config.owned_answer_post_root_ids[answer_post_id] = event.root_post_id
+    if config.owned_answer_post_message_ids is not None:
+        config.owned_answer_post_message_ids[answer_post_id] = message_id
 
 
 def _stream_mattermost_answer_packets(
@@ -118,6 +169,7 @@ def _stream_mattermost_answer_packets(
     db_session: Session,
     event: NormalizedMattermostEvent,
     target: MattermostChatTarget,
+    config: MattermostHandlerConfig,
 ) -> Iterator[AnswerStreamPart]:
     if target.persona_id is None:
         raise ValueError("Mattermost thread mapping is missing persona")
@@ -140,6 +192,7 @@ def _stream_mattermost_answer_packets(
         origin=MessageOrigin.MATTERMOSTBOT,
         parent_message_id=target.parent_message_id,
         chat_session_id=target.chat_session_id,
+        mock_llm_response=config.mock_llm_response,
     )
 
     def _packets() -> Iterator[AnswerStreamPart]:

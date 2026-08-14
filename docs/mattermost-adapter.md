@@ -168,3 +168,17 @@ No external credential is required to verify this contract. Tests use static fix
 Credential-gated work starts only when a later issue needs a live Mattermost API call. That later
 work must use a separate test bot and private test channel. It must not use the production `@orka`
 account or production Mattermost runtime.
+
+## Issue #8 verification tiers
+
+Credential-independent verification runs the mocked Mattermost adapter end-to-end path in
+`backend/tests/integration/tests/mattermost_bot/test_mattermost_bot_e2e.py`. It covers DM routing,
+channel mention routing, thread follow-up continuity, citation rendering, single-post streaming
+updates, reaction feedback mapping, and replay deduplication without contacting Mattermost.
+
+Live disposable Mattermost verification is gated on separate test credentials. Required secret names
+are `MATTERMOST_BOT_URL`, `MATTERMOST_BOT_TOKEN`, `MATTERMOST_BOT_PERSONA_ID`,
+`MATTERMOST_BOT_USER_ID`, and `MATTERMOST_BOT_ALLOWED_CHANNEL_IDS`. Optional scope controls are
+`MATTERMOST_BOT_ALLOWED_TEAM_IDS`, `MATTERMOST_BOT_APPROVED_USER_IDS`, and
+`MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS`. These values must point to a disposable test bot and test
+channel only.

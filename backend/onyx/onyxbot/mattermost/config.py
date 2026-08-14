@@ -61,6 +61,7 @@ def load_mattermost_bot_config_from_env() -> MattermostBotConfig:
         allowed_team_ids=_csv_env(MATTERMOST_BOT_ALLOWED_TEAM_IDS_ENV),
         approved_user_ids=_csv_env(MATTERMOST_BOT_APPROVED_USER_IDS_ENV),
         root_post_channel_ids=_csv_env(MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS_ENV),
+        owned_thread_root_ids=set(),
     )
 
     return MattermostBotConfig(
