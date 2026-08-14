@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
+from onyx.db.mattermost_bot import hydrate_mattermost_listener_config
 from onyx.onyxbot.mattermost.client import MattermostClient
 from onyx.onyxbot.mattermost.config import (
     MattermostBotConfig,
@@ -54,6 +55,9 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
 
 
 async def _run_bot(config: MattermostBotConfig) -> None:
+    with get_session_with_current_tenant() as db_session:
+        hydrate_mattermost_listener_config(db_session, config.listener_config)
+
     handler_config = MattermostHandlerConfig(
         persona_id=config.persona_id,
         owned_thread_root_ids=config.listener_config.owned_thread_root_ids,

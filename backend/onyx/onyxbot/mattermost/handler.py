@@ -14,7 +14,12 @@ from onyx.chat.process_message import handle_stream_message_objects
 from onyx.configs.constants import MessageType, QAFeedbackType
 from onyx.db.chat import get_chat_message
 from onyx.db.feedback import create_chat_message_feedback
-from onyx.db.mattermost_bot import update_mattermost_thread_parent_message
+from onyx.db.mattermost_bot import (
+    get_mattermost_thread_mapping,
+    record_mattermost_event_state,
+    tombstone_mattermost_thread_mapping,
+    update_mattermost_thread_parent_message,
+)
 from onyx.db.models import ChatMessage
 from onyx.db.persona import get_persona_by_id
 from onyx.db.users import get_or_create_mattermost_service_account
@@ -72,12 +77,42 @@ async def handle_normalized_mattermost_event(
     Returns False for events that do not route to Onyx chat.
     """
 
-    if event.event_type in {
-        MattermostNormalizedEventType.POST_DELETE_TOMBSTONE,
-    }:
-        return False
+    if event.event_type == MattermostNormalizedEventType.POST_DELETE_TOMBSTONE:
+        tombstone_mattermost_thread_mapping(
+            db_session=db_session,
+            server_id=event.team_id,
+            channel_id=event.channel_id,
+            root_id=event.root_post_id,
+        )
+        if config.owned_thread_root_ids is not None:
+            config.owned_thread_root_ids.discard(event.root_post_id)
+        answer_post_ids = [
+            answer_post_id
+            for answer_post_id, root_id in (
+                config.owned_answer_post_root_ids or {}
+            ).items()
+            if root_id == event.root_post_id
+        ]
+        for answer_post_id in answer_post_ids:
+            if config.owned_answer_post_root_ids is not None:
+                config.owned_answer_post_root_ids.pop(answer_post_id, None)
+            if config.owned_answer_post_message_ids is not None:
+                config.owned_answer_post_message_ids.pop(answer_post_id, None)
+        return True
 
     if event.event_type == MattermostNormalizedEventType.REACTION_FEEDBACK:
+        mapping = get_mattermost_thread_mapping(
+            db_session=db_session,
+            server_id=event.team_id,
+            channel_id=event.channel_id,
+            root_id=event.root_post_id,
+        )
+        if mapping is not None:
+            record_mattermost_event_state(
+                db_session=db_session,
+                mapping=mapping,
+                dedupe_key=event.dedupe_key,
+            )
         return _record_feedback_event(event=event, db_session=db_session)
 
     if not event.text.strip():
@@ -89,6 +124,11 @@ async def handle_normalized_mattermost_event(
             event=event,
             persona_id=config.persona_id,
             onyx_user_id=config.onyx_user_id,
+        )
+        record_mattermost_event_state(
+            db_session=db_session,
+            mapping=target.mapping,
+            dedupe_key=event.dedupe_key,
         )
         packets = _stream_mattermost_answer_packets(
             db_session=db_session,
@@ -121,6 +161,13 @@ async def handle_normalized_mattermost_event(
         db_session=db_session,
         mapping=target.mapping,
         parent_message_id=stream_result.message_id,
+    )
+    record_mattermost_event_state(
+        db_session=db_session,
+        mapping=target.mapping,
+        dedupe_key=event.dedupe_key,
+        answer_post_id=stream_result.post_id,
+        message_id=stream_result.message_id,
     )
     _record_owned_answer(
         config=config,

@@ -232,6 +232,50 @@ async def test_failure_posts_safe_thread_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_root_deletion_relinquishes_owned_thread_without_deleting_history() -> (
+    None
+):
+    db_session = MagicMock()
+    client = MagicMock()
+    config = MattermostHandlerConfig(
+        persona_id=456,
+        owned_thread_root_ids={"post-root-1"},
+        owned_answer_post_root_ids={"bot-post-1": "post-root-1"},
+        owned_answer_post_message_ids={"bot-post-1": 22},
+    )
+    event = _event(
+        event_type=MattermostNormalizedEventType.POST_DELETE_TOMBSTONE,
+        post_id="post-root-1",
+        root_post_id="post-root-1",
+        text="",
+    )
+    mapping = MagicMock(answer_post_message_ids={"bot-post-1": 22})
+
+    with patch(
+        "onyx.onyxbot.mattermost.handler.tombstone_mattermost_thread_mapping",
+        return_value=mapping,
+    ) as mock_tombstone:
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=config,
+            client=client,
+            db_session=db_session,
+        )
+
+    assert handled is True
+    mock_tombstone.assert_called_once_with(
+        db_session=db_session,
+        server_id="team-1",
+        channel_id="channel-1",
+        root_id="post-root-1",
+    )
+    assert config.owned_thread_root_ids == set()
+    assert config.owned_answer_post_root_ids == {}
+    assert config.owned_answer_post_message_ids == {}
+    client.create_post.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reaction_feedback_records_chat_message_feedback() -> None:
     db_session = MagicMock()
     event = NormalizedMattermostEvent(

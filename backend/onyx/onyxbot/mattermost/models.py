@@ -71,6 +71,7 @@ class MattermostListenerConfig:
     owned_thread_root_ids: set[str] = field(default_factory=set)
     owned_answer_post_root_ids: dict[str, str] = field(default_factory=dict)
     owned_answer_post_message_ids: dict[str, int] = field(default_factory=dict)
+    processed_event_ids: list[str] = field(default_factory=list)
     bot_user_ids: frozenset[str] = frozenset()
     max_seen_event_ids: int = 10_000
     initial_reconnect_backoff_seconds: float = 1.0
@@ -99,3 +100,4 @@ class NormalizedMattermostEvent:
     feedback_answer_post_id: str | None = None
     feedback_action: QAFeedbackType | None = None
     feedback_message_id: int | None = None
+    dedupe_key: str = ""

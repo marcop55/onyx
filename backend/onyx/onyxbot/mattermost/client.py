@@ -1,6 +1,9 @@
 """Typed Mattermost REST and WebSocket client."""
 
-from collections.abc import AsyncIterator, Mapping
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import cast
 
 import aiohttp
@@ -24,6 +27,9 @@ class MattermostResponseError(MattermostClientError):
         self.status_code = status_code
 
 
+_SLEEP = Callable[[float], Awaitable[None]]
+
+
 class MattermostClient:
     """Async client for Mattermost REST and WebSocket APIs."""
 
@@ -34,12 +40,18 @@ class MattermostClient:
         *,
         request_timeout_seconds: int = 30,
         session: aiohttp.ClientSession | None = None,
+        max_rate_limit_retries: int = 3,
+        max_rate_limit_backoff_seconds: float = 30.0,
+        sleep: _SLEEP = asyncio.sleep,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._request_timeout_seconds = request_timeout_seconds
         self._session = session
         self._owns_session = session is None
+        self._max_rate_limit_retries = max(0, max_rate_limit_retries)
+        self._max_rate_limit_backoff_seconds = max(0.0, max_rate_limit_backoff_seconds)
+        self._sleep = sleep
 
     async def __aenter__(self) -> "MattermostClient":
         await self.initialize()
@@ -131,19 +143,56 @@ class MattermostClient:
         json: dict[str, object] | None = None,
     ) -> dict[str, object]:
         session = self._require_session()
-        async with session.request(
-            method,
-            f"{self._base_url}{path}",
-            json=json,
-            headers=self._headers,
-        ) as response:
-            if response.status >= 400:
-                text = await response.text()
-                raise MattermostResponseError(text, response.status)
-            payload = await response.json()
-            if not isinstance(payload, dict):
-                raise MattermostClientError("Mattermost returned a non-object payload")
-            return payload
+        for attempt in range(self._max_rate_limit_retries + 1):
+            async with session.request(
+                method,
+                f"{self._base_url}{path}",
+                json=json,
+                headers=self._headers,
+            ) as response:
+                if response.status == 429:
+                    text = await response.text()
+                    if attempt >= self._max_rate_limit_retries:
+                        raise MattermostResponseError(text, response.status)
+                    retry_after = _retry_after_seconds(
+                        response.headers.get("Retry-After")
+                    )
+                    fallback_backoff = float(2**attempt)
+                    await self._sleep(
+                        min(
+                            retry_after
+                            if retry_after is not None
+                            else fallback_backoff,
+                            self._max_rate_limit_backoff_seconds,
+                        )
+                    )
+                    continue
+                if response.status >= 400:
+                    text = await response.text()
+                    raise MattermostResponseError(text, response.status)
+                payload = await response.json()
+                if not isinstance(payload, dict):
+                    raise MattermostClientError(
+                        "Mattermost returned a non-object payload"
+                    )
+                return payload
+
+        raise RuntimeError("Mattermost rate-limit retry loop exhausted unexpectedly")
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
 
 def mattermost_event_from_payload(
@@ -218,6 +267,17 @@ def _post_from_mapping(mapping: Mapping[object, object]) -> MattermostPost:
 
 
 def _reaction_from_payload(value: object) -> MattermostReaction | None:
+    if isinstance(value, str):
+        try:
+            import json
+
+            decoded = json.loads(value)
+        except ValueError:
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        value = decoded
+
     if not isinstance(value, dict):
         return None
 

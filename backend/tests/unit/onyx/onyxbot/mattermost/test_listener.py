@@ -307,6 +307,26 @@ def test_thread_reply_followup_emits_normalized_event_for_owned_thread() -> None
     assert event.session_key == "mattermost:channel:team_1:channel_1:post_root_1"
 
 
+def test_answer_post_deletion_does_not_relinquish_root_ownership() -> None:
+    normalizer = MattermostEventNormalizer(_config())
+    envelope = MattermostEventEnvelope(
+        event="post_deleted",
+        team_id="team_1",
+        channel_id="channel_1",
+        channel_type="O",
+        user_id=_APPROVED_USER_ID,
+        post=MattermostPost(
+            id="bot_answer_1",
+            root_id="post_root_1",
+            message="",
+            user_id=_APPROVED_USER_ID,
+            channel_id="channel_1",
+        ),
+    )
+
+    assert normalizer.normalize(envelope) is None
+
+
 @pytest.mark.parametrize(
     ("raw_event_type", "expected_event_type"),
     [
@@ -389,12 +409,10 @@ def test_real_reaction_added_payload_emits_typed_feedback_event() -> None:
             "event": "reaction_added",
             "seq": 13,
             "data": {
-                "reaction": {
-                    "user_id": _APPROVED_USER_ID,
-                    "post_id": "bot_answer_1",
-                    "emoji_name": "+1",
-                    "channel_id": "channel_1",
-                },
+                "reaction": (
+                    '{"user_id":"user_1","post_id":"bot_answer_1",'
+                    '"emoji_name":"+1","channel_id":"channel_1"}'
+                ),
                 "team_id": "team_1",
             },
             "broadcast": {"channel_id": "channel_1", "team_id": "team_1"},
@@ -416,6 +434,19 @@ def test_real_reaction_added_payload_emits_typed_feedback_event() -> None:
         "feedback_action": "like",
         "feedback_message_id": "22",
     }
+
+
+def test_malformed_reaction_added_payload_is_rejected() -> None:
+    envelope = mattermost_event_from_payload(
+        {
+            "event": "reaction_added",
+            "data": {"reaction": "{not-json"},
+            "broadcast": {"channel_id": "channel_1", "team_id": "team_1"},
+        }
+    )
+
+    assert envelope.reaction is None
+    assert MattermostEventNormalizer(_config()).normalize(envelope) is None
 
 
 def test_reaction_feedback_ignores_unowned_answer_posts() -> None:

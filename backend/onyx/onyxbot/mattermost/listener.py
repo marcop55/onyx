@@ -1,6 +1,7 @@
 """Mattermost event normalization and reconnect handling."""
 
 import asyncio
+import hashlib
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -29,7 +30,9 @@ class MattermostEventNormalizer:
 
     def __init__(self, config: MattermostListenerConfig) -> None:
         self._config = config
-        self._seen_event_ids: OrderedDict[str, None] = OrderedDict()
+        self._seen_event_ids: OrderedDict[str, None] = OrderedDict(
+            (event_id, None) for event_id in config.processed_event_ids
+        )
 
     def normalize(
         self,
@@ -145,6 +148,8 @@ class MattermostEventNormalizer:
             )
 
         if envelope.event == "post_deleted":
+            if post.id != root_post_id:
+                return None
             if root_post_id not in self._config.owned_thread_root_ids:
                 return None
             return self._build_channel_event(
@@ -209,6 +214,7 @@ class MattermostEventNormalizer:
             feedback_answer_post_id=reaction.post_id,
             feedback_action=feedback_action,
             feedback_message_id=message_id,
+            dedupe_key=self._dedupe_key(envelope),
         )
 
     def _build_channel_event(
@@ -258,6 +264,7 @@ class MattermostEventNormalizer:
             user_id=user_id,
             text=text.strip(),
             raw_event_type=envelope.event,
+            dedupe_key=self._dedupe_key(envelope),
         )
 
     def _is_allowed_channel(self, team_id: str, channel_id: str) -> bool:
@@ -276,7 +283,9 @@ class MattermostEventNormalizer:
 
     def _strip_bot_mention(self, text: str) -> str:
         updated_text = text
-        for mention in sorted(self._config.bot_mentions, key=len, reverse=True):
+        for mention in sorted(
+            self._config.bot_mentions, key=lambda value: len(value), reverse=True
+        ):
             escaped_mention = re.escape(mention)
             updated_text = re.sub(
                 rf"(?<!\w){escaped_mention}(?!\w)",
@@ -289,12 +298,21 @@ class MattermostEventNormalizer:
     def _dedupe_key(self, envelope: MattermostEventEnvelope) -> str:
         if envelope.event_id:
             return f"event_id:{envelope.event_id}"
-        if envelope.sequence is not None:
-            return f"seq:{envelope.sequence}"
         if envelope.reaction is not None:
-            return f"fallback:{envelope.event}:{envelope.reaction.post_id}"
-        post_id = envelope.post.id if envelope.post is not None else "none"
-        return f"fallback:{envelope.event}:{post_id}"
+            reaction = envelope.reaction
+            return (
+                f"fallback:{envelope.event}:{reaction.user_id}:"
+                f"{reaction.post_id}:{reaction.emoji_name}"
+            )
+        if envelope.post is not None:
+            content_digest = hashlib.sha256(
+                envelope.post.message.encode("utf-8")
+            ).hexdigest()
+            return f"fallback:{envelope.event}:{envelope.post.id}:{content_digest}"
+        return (
+            f"fallback:{envelope.event}:{envelope.channel_id}:"
+            f"{envelope.user_id or 'unknown'}"
+        )
 
     def _already_seen(self, dedupe_key: str) -> bool:
         if dedupe_key in self._seen_event_ids:

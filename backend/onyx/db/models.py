@@ -3129,6 +3129,21 @@ class MattermostThreadMapping(Base):
     parent_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
     )
+    answer_post_message_ids: Mapped[dict[str, int]] = mapped_column(
+        postgresql.JSONB(),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    processed_event_ids: Mapped[list[str]] = mapped_column(
+        postgresql.JSONB(),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     time_created: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
