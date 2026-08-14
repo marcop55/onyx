@@ -1,7 +1,7 @@
 """add mattermost thread mapping
 
 Revision ID: a14eb2f1d9c0
-Revises: 3350a25df58e
+Revises: f57f35403f6c
 Create Date: 2026-08-14 01:30:00.000000
 
 """
@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = "a14eb2f1d9c0"
-down_revision = "3350a25df58e"
+down_revision = "f57f35403f6c"
 branch_labels = None
 depends_on = None
 
