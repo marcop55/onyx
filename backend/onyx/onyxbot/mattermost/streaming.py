@@ -97,6 +97,12 @@ async def stream_mattermost_answer(
                 continue
             if isinstance(packet, StreamingError):
                 raise RuntimeError(packet.error)
+            if isinstance(packet, ChatBasicResponse):
+                answer = packet.answer
+                top_documents = packet.top_documents
+                citations = packet.citation_info
+                message_id = packet.message_id
+                continue
             if not isinstance(packet, Packet):
                 continue
 

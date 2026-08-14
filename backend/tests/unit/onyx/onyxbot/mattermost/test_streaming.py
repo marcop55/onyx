@@ -91,6 +91,43 @@ def test_recovered_keyed_turn_never_runs_provider_or_tools() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_mattermost_answer_preserves_recovered_keyed_response() -> None:
+    client = _RecordingClient()
+    recovered = ChatBasicResponse(
+        answer="recovered answer [1]",
+        answer_citationless="recovered answer",
+        top_documents=[_search_doc()],
+        error_msg=None,
+        message_id=22,
+        citation_info=[CitationInfo(citation_number=1, document_id="doc-1")],
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=iter(
+            [
+                MessageResponseIDInfo(
+                    user_message_id=10, reserved_assistant_message_id=22
+                ),
+                recovered,
+            ]
+        ),
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="checkpointed-post")
+    assert client.created_posts == []
+    assert client.updated_posts == [
+        {
+            "post_id": "checkpointed-post",
+            "message": "recovered answer [1]\n\nSources:\n[1] Mattermost Doc - https://example.test/doc",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_mattermost_answer_updates_one_rooted_post_with_final_citations() -> (
     None
 ):
