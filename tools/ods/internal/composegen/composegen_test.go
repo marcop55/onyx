@@ -1,11 +1,15 @@
 package composegen
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/compose-spec/compose-go/v2/loader"
+	"github.com/compose-spec/compose-go/v2/types"
 )
 
 var allVariants = []string{"default", "prod", "no-letsencrypt"}
@@ -280,5 +284,49 @@ func TestCheckedInFilesMatchTemplate(t *testing.T) {
 			t.Errorf("%s does not match %s: run `ods generate-compose --write` and commit the result",
 				v.Filename, TemplateName)
 		}
+	}
+}
+
+func TestMattermostBotHealthcheckUsesConfiguredPort(t *testing.T) {
+	dir := filepath.Join("..", "..", "..", "..", "deployment", "docker_compose")
+	composePath := filepath.Join(dir, "docker-compose.yml")
+	composeData, err := os.ReadFile(composePath)
+	if err != nil {
+		t.Fatalf("failed to read docker-compose.yml: %v", err)
+	}
+
+	project, err := loader.LoadWithContext(
+		context.Background(),
+		types.ConfigDetails{
+			WorkingDir: dir,
+			ConfigFiles: []types.ConfigFile{{
+				Filename: composePath,
+				Content:  composeData,
+			}},
+			Environment: types.Mapping{
+				"COMPOSE_PROFILES":     "mattermost-bot",
+				"MATTERMOST_BOT_PORT": "8092",
+			},
+		},
+		loader.WithProfiles([]string{"mattermost-bot"}),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithContext failed: %v", err)
+	}
+
+	service, err := project.GetService("mattermost_bot")
+	if err != nil {
+		t.Fatalf("mattermost_bot service missing: %v", err)
+	}
+	if service.HealthCheck == nil {
+		t.Fatal("mattermost_bot healthcheck missing")
+	}
+
+	testCommand := strings.Join(service.HealthCheck.Test, " ")
+	if !strings.Contains(testCommand, "127.0.0.1:8092/health") {
+		t.Fatalf("healthcheck = %q, want configured port 8092", testCommand)
+	}
+	if strings.Contains(testCommand, "127.0.0.1:8091/health") {
+		t.Fatalf("healthcheck still uses default port: %q", testCommand)
 	}
 }
