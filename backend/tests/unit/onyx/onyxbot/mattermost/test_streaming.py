@@ -25,7 +25,9 @@ from onyx.server.query_and_chat.streaming_models import (
 
 
 @pytest.mark.asyncio
-async def test_stream_mattermost_answer_updates_one_rooted_post_with_final_citations() -> None:
+async def test_stream_mattermost_answer_updates_one_rooted_post_with_final_citations() -> (
+    None
+):
     client = _RecordingClient()
     packets = iter(
         [
@@ -183,9 +185,7 @@ async def test_handle_normalized_event_streams_and_records_parent_message() -> N
     assert client.created_posts == [
         {"channel_id": "channel-1", "root_id": "root-post-1", "message": "..."}
     ]
-    assert client.updated_posts == [
-        {"post_id": "bot-post-1", "message": "Onyx answer"}
-    ]
+    assert client.updated_posts == [{"post_id": "bot-post-1", "message": "Onyx answer"}]
     mock_update_parent.assert_called_once_with(
         db_session=db_session,
         mapping=target.mapping,
@@ -194,7 +194,9 @@ async def test_handle_normalized_event_streams_and_records_parent_message() -> N
 
 
 @pytest.mark.asyncio
-async def test_handle_normalized_event_does_not_duplicate_visible_stream_failure() -> None:
+async def test_handle_normalized_event_does_not_duplicate_visible_stream_failure() -> (
+    None
+):
     from onyx.onyxbot.mattermost.handler import (
         MattermostHandlerConfig,
         handle_normalized_mattermost_event,
