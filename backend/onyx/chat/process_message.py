@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Final, cast
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from onyx.cache.factory import get_cache_backend
@@ -70,7 +71,9 @@ from onyx.configs.constants import (
 )
 from onyx.context.search.models import BaseFilters, SearchDoc
 from onyx.db.chat import (
+    TERMINATED_RESPONSE_PLACEHOLDER,
     create_new_chat_message,
+    get_chat_message_by_external_idempotency_key,
     get_chat_session_by_id,
     get_or_create_root_message,
     reserve_message_id,
@@ -593,6 +596,7 @@ def build_chat_turn(
     # conversation cannot be represented by a chain of User/Assistant messages.
     # NOTE: not stored in the database, only passed in to the LLM as context
     additional_context: str | None = None,
+    external_idempotency_key: str | None = None,
 ) -> Generator[AnswerStreamPart, None, ChatTurnSetup]:
     """Shared setup generator for both single-model and multi-model chat turns.
 
@@ -737,8 +741,50 @@ def build_chat_turn(
         )
 
     # ── Query Processing hook + user message ─────────────────────────────────
+    # A trusted external transport may supply a stable key so replay reuses the
+    # already-committed user message rather than appending a second turn.
+    external_user_key = (
+        f"{external_idempotency_key}:user" if external_idempotency_key else None
+    )
+    external_assistant_key = (
+        f"{external_idempotency_key}:assistant" if external_idempotency_key else None
+    )
+    pre_reserved_assistant: ChatMessage | None = None
+    loaded_external_turn = False
+    existing_external_user = (
+        get_chat_message_by_external_idempotency_key(
+            db_session=db_session,
+            external_idempotency_key=external_user_key,
+        )
+        if external_user_key
+        else None
+    )
+    if existing_external_user is not None:
+        loaded_external_turn = True
+        if (
+            existing_external_user.chat_session_id != chat_session.id
+            or existing_external_user.message_type != MessageType.USER
+            or existing_external_user.parent_message_id != parent_message.id
+        ):
+            raise ValueError("External idempotency key belongs to another chat turn")
+        user_message = existing_external_user
+        if external_assistant_key is None:
+            raise RuntimeError("External assistant key is missing")
+        pre_reserved_assistant = get_chat_message_by_external_idempotency_key(
+            db_session=db_session,
+            external_idempotency_key=external_assistant_key,
+        )
+        if pre_reserved_assistant is None:
+            raise RuntimeError("Externally keyed chat turn is incomplete")
+        if (
+            pre_reserved_assistant.chat_session_id != chat_session.id
+            or pre_reserved_assistant.message_type != MessageType.ASSISTANT
+            or pre_reserved_assistant.parent_message_id != user_message.id
+        ):
+            raise ValueError("External assistant key belongs to another chat turn")
+        chat_history.append(user_message)
     # Skipped on regeneration (parent is USER type): message already exists/was accepted.
-    if parent_message.message_type == MessageType.USER:
+    elif parent_message.message_type == MessageType.USER:
         user_message = parent_message
     else:
         # New message — run the Query Processing hook before saving to DB.
@@ -767,16 +813,55 @@ def build_chat_turn(
         # assistant/summary rows in save_chat.py) so budget math sums a single
         # unit even after mid-session model switches.
         default_tokenizer = get_tokenizer(None, None)
-        user_message = create_new_chat_message(
-            chat_session_id=chat_session.id,
-            parent_message=parent_message,
-            message=message_text,
-            token_count=len(default_tokenizer.encode(message_text)),
-            message_type=MessageType.USER,
-            files=new_msg_req.file_descriptors,
-            db_session=db_session,
-            commit=True,
-        )
+        if external_user_key and external_assistant_key:
+            try:
+                user_message = create_new_chat_message(
+                    chat_session_id=chat_session.id,
+                    parent_message=parent_message,
+                    message=message_text,
+                    token_count=len(default_tokenizer.encode(message_text)),
+                    message_type=MessageType.USER,
+                    files=new_msg_req.file_descriptors,
+                    db_session=db_session,
+                    commit=False,
+                    external_idempotency_key=external_user_key,
+                )
+                pre_reserved_assistant = reserve_message_id(
+                    db_session=db_session,
+                    chat_session_id=chat_session.id,
+                    parent_message=user_message.id,
+                    message_type=MessageType.ASSISTANT,
+                    model_display_name=model_display_names[0],
+                    external_idempotency_key=external_assistant_key,
+                    commit=False,
+                )
+                db_session.commit()
+            except IntegrityError:
+                db_session.rollback()
+                loaded_external_turn = True
+                user_message = get_chat_message_by_external_idempotency_key(
+                    db_session=db_session,
+                    external_idempotency_key=external_user_key,
+                )
+                pre_reserved_assistant = get_chat_message_by_external_idempotency_key(
+                    db_session=db_session,
+                    external_idempotency_key=external_assistant_key,
+                )
+                if user_message is None or pre_reserved_assistant is None:
+                    raise RuntimeError(
+                        "Externally keyed chat turn lost its create-or-load race"
+                    )
+        else:
+            user_message = create_new_chat_message(
+                chat_session_id=chat_session.id,
+                parent_message=parent_message,
+                message=message_text,
+                token_count=len(default_tokenizer.encode(message_text)),
+                message_type=MessageType.USER,
+                files=new_msg_req.file_descriptors,
+                db_session=db_session,
+                commit=True,
+            )
         chat_history.append(user_message)
 
     # Collect file IDs for the file reader tool *before* summary truncation so
@@ -912,6 +997,10 @@ def build_chat_turn(
 
     # ── Reserve assistant message ID(s) → yield to frontend ──────────────────
     if is_multi:
+        if external_idempotency_key:
+            raise ValueError(
+                "External idempotency is supported only for single-model turns"
+            )
         assert llm_overrides is not None
         reserved_messages = reserve_multi_model_message_ids(
             db_session=db_session,
@@ -927,13 +1016,33 @@ def build_chat_turn(
             ],
         )
     else:
-        assistant_response = reserve_message_id(
-            db_session=db_session,
-            chat_session_id=chat_session.id,
-            parent_message=user_message.id,
-            message_type=MessageType.ASSISTANT,
-            model_display_name=model_display_names[0],
+        existing_external_assistant = pre_reserved_assistant or (
+            get_chat_message_by_external_idempotency_key(
+                db_session=db_session,
+                external_idempotency_key=external_assistant_key,
+            )
+            if external_assistant_key
+            else None
         )
+        if existing_external_assistant is not None:
+            if (
+                existing_external_assistant.chat_session_id != chat_session.id
+                or existing_external_assistant.message_type != MessageType.ASSISTANT
+                or existing_external_assistant.parent_message_id != user_message.id
+            ):
+                raise ValueError(
+                    "External idempotency key belongs to another assistant response"
+                )
+            assistant_response = existing_external_assistant
+        else:
+            assistant_response = reserve_message_id(
+                db_session=db_session,
+                chat_session_id=chat_session.id,
+                parent_message=user_message.id,
+                message_type=MessageType.ASSISTANT,
+                model_display_name=model_display_names[0],
+                external_idempotency_key=external_assistant_key,
+            )
         reserved_messages = [assistant_response]
         yield MessageResponseIDInfo(
             user_message_id=user_message.id,
@@ -1040,6 +1149,22 @@ def build_chat_turn(
         slack_context=slack_context,
         custom_tool_additional_headers=custom_tool_additional_headers,
         mcp_headers=mcp_headers,
+        recovered_response=(
+            ChatBasicResponse(
+                answer=reserved_messages[0].message,
+                answer_citationless=reserved_messages[0].message,
+                top_documents=[],
+                error_msg=(
+                    "Externally keyed turn was interrupted before completion"
+                    if reserved_messages[0].message == TERMINATED_RESPONSE_PLACEHOLDER
+                    else None
+                ),
+                message_id=reserved_messages[0].id,
+                citation_info=[],
+            )
+            if loaded_external_turn
+            else None
+        ),
     )
 
 
@@ -1571,6 +1696,7 @@ def _stream_chat_turn(
     additional_context: str | None = None,
     slack_context: SlackContext | None = None,
     external_state_container: ChatStateContainer | None = None,
+    external_idempotency_key: str | None = None,
 ) -> AnswerStream:
     """Private implementation for single-model and multi-model chat turn streaming.
 
@@ -1657,6 +1783,7 @@ def _stream_chat_turn(
                     bypass_acl=bypass_acl,
                     slack_context=slack_context,
                     additional_context=additional_context,
+                    external_idempotency_key=external_idempotency_key,
                 )
                 while True:
                     try:
@@ -1677,6 +1804,14 @@ def _stream_chat_turn(
         assert setup is not None, (
             "build_chat_turn must complete before _run_models is called"
         )
+        if setup.recovered_response is not None:
+            set_processing_status(
+                chat_session_id=setup.chat_session.id,
+                cache=setup.cache,
+                value=False,
+            )
+            yield setup.recovered_response
+            return
         stream_buffer = StreamBufferWriter(
             cache=setup.cache,
             chat_session_id=setup.chat_session.id,
@@ -1792,6 +1927,8 @@ def handle_stream_message_objects(
     additional_context: str | None = None,
     slack_context: SlackContext | None = None,
     external_state_container: ChatStateContainer | None = None,
+    *,
+    external_idempotency_key: str | None = None,
 ) -> AnswerStream:
     """Single-model streaming entrypoint. For multi-model comparison, use ``handle_multi_model_stream``."""
     yield from _stream_chat_turn(
@@ -1805,6 +1942,7 @@ def handle_stream_message_objects(
         additional_context=additional_context,
         slack_context=slack_context,
         external_state_container=external_state_container,
+        external_idempotency_key=external_idempotency_key,
     )
 
 

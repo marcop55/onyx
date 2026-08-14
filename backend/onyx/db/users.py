@@ -16,6 +16,7 @@ from onyx.auth.schemas import UserRole
 from onyx.configs.constants import (
     ANONYMOUS_USER_EMAIL,
     DANSWER_API_KEY_DUMMY_EMAIL_DOMAIN,
+    MATTERMOST_SERVICE_ACCOUNT_EMAIL,
     NO_AUTH_PLACEHOLDER_USER_EMAIL,
     SLACK_SERVICE_ACCOUNT_EMAIL,
 )
@@ -411,6 +412,33 @@ def get_or_create_slack_service_account(db_session: Session) -> User:
     except IntegrityError:
         db_session.rollback()
         concurrent_user = get_user_by_email(SLACK_SERVICE_ACCOUNT_EMAIL, db_session)
+        if concurrent_user is None:
+            raise
+        return concurrent_user
+
+
+def get_or_create_mattermost_service_account(db_session: Session) -> User:
+    user = get_user_by_email(MATTERMOST_SERVICE_ACCOUNT_EMAIL, db_session)
+    if user is not None:
+        return user
+
+    user = User(
+        email=MATTERMOST_SERVICE_ACCOUNT_EMAIL,
+        hashed_password=_generate_password_hash(),
+        is_active=True,
+        is_verified=True,
+        role=UserRole.LIMITED,
+        account_type=AccountType.SERVICE_ACCOUNT,
+    )
+    db_session.add(user)
+    try:
+        db_session.commit()
+        return user
+    except IntegrityError:
+        db_session.rollback()
+        concurrent_user = get_user_by_email(
+            MATTERMOST_SERVICE_ACCOUNT_EMAIL, db_session
+        )
         if concurrent_user is None:
             raise
         return concurrent_user

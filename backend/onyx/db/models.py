@@ -3094,6 +3094,70 @@ class ChatSession(Base):
     persona: Mapped["Persona"] = relationship("Persona")
 
 
+class MattermostThreadMapping(Base):
+    __tablename__ = "mattermost_thread_mapping"
+    __table_args__ = (
+        UniqueConstraint(
+            "server_id",
+            "channel_id",
+            "root_id",
+            name="uq_mattermost_thread_mapping_thread",
+        ),
+        UniqueConstraint(
+            "chat_session_id",
+            name="uq_mattermost_thread_mapping_chat_session_id",
+        ),
+        Index(
+            "ix_mattermost_thread_mapping_thread_lookup",
+            "server_id",
+            "channel_id",
+            "root_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    server_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_id: Mapped[str] = mapped_column(String, nullable=False)
+    mattermost_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    persona_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persona.id", ondelete="SET NULL"), nullable=True
+    )
+    chat_session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("chat_session.id", ondelete="CASCADE")
+    )
+    parent_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
+    answer_post_message_ids: Mapped[dict[str, int]] = mapped_column(
+        postgresql.JSONB(),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    processed_event_ids: Mapped[list[str]] = mapped_column(
+        postgresql.JSONB(),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    chat_session: Mapped[ChatSession] = relationship("ChatSession")
+    parent_message: Mapped["ChatMessage | None"] = relationship(
+        "ChatMessage", foreign_keys=[parent_message_id]
+    )
+    persona: Mapped["Persona | None"] = relationship("Persona")
+
+
 class ChatMessage(Base):
     """Note, the first message in a chain has no contents, it's a workaround to allow edits
     on the first message of a session, an empty root node basically
@@ -3109,9 +3173,16 @@ class ChatMessage(Base):
         # failed-session check, retention/GC deletes and the cascade delete of
         # a session's messages), which otherwise seq-scan chat_message.
         Index("ix_chat_message_chat_session_id", "chat_session_id"),
+        Index(
+            "uq_chat_message_external_idempotency_key",
+            "external_idempotency_key",
+            unique=True,
+            postgresql_where=text("external_idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    external_idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Where is this message located
     chat_session_id: Mapped[UUID] = mapped_column(
@@ -3305,6 +3376,65 @@ class ToolCall(Base):
         back_populates="tool_calls",
         cascade="all, delete-orphan",
         single_parent=True,
+    )
+
+
+class MattermostEventState(Base):
+    __tablename__ = "mattermost_event_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "instance_id",
+            "channel_id",
+            "dedupe_key",
+            name="uq_mattermost_event_state_event",
+        ),
+        UniqueConstraint(
+            "mattermost_post_id",
+            name="uq_mattermost_event_state_post_id",
+        ),
+        Index(
+            "ix_mattermost_event_state_claim",
+            "state",
+            "lease_expires_at",
+        ),
+        Index("ix_mattermost_event_state_mapping_id", "mapping_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    mapping_id: Mapped[int | None] = mapped_column(
+        ForeignKey("mattermost_thread_mapping.id", ondelete="CASCADE"), nullable=True
+    )
+    source_post_id: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String, nullable=False, default="claimed", server_default="claimed"
+    )
+    claim_owner: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True
+    )
+    lease_expires_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    mattermost_pending_post_id: Mapped[str] = mapped_column(String, nullable=False)
+    mattermost_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    onyx_user_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
+    onyx_assistant_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
+    feedback_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_feedback.id", ondelete="SET NULL"), nullable=True
+    )
+    rendered_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 
