@@ -68,12 +68,11 @@ def load_mattermost_bot_config_from_env() -> MattermostBotConfig:
     token = _required_env(MATTERMOST_BOT_TOKEN_ENV)
     persona_id = _required_int_env(MATTERMOST_BOT_PERSONA_ID_ENV)
     bot_user_id = _required_env(MATTERMOST_BOT_USER_ID_ENV)
-    allowed_channel_ids = _required_csv_env(MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV)
 
     listener_config = MattermostListenerConfig(
         bot_user_id=bot_user_id,
         bot_mentions=_csv_env(MATTERMOST_BOT_MENTIONS_ENV) or _DEFAULT_BOT_MENTIONS,
-        allowed_channel_ids=allowed_channel_ids,
+        allowed_channel_ids=_csv_env(MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV),
         allowed_team_ids=_csv_env(MATTERMOST_BOT_ALLOWED_TEAM_IDS_ENV),
         approved_user_ids=_csv_env(MATTERMOST_BOT_APPROVED_USER_IDS_ENV),
         root_post_channel_ids=_csv_env(MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS_ENV),
@@ -140,13 +139,6 @@ def _csv_env(name: str) -> frozenset[str]:
     if value is None:
         return frozenset()
     return frozenset(item.strip() for item in value.split(",") if item.strip())
-
-
-def _required_csv_env(name: str) -> frozenset[str]:
-    values = _csv_env(name)
-    if not values:
-        raise MattermostBotConfigError(f"{name} must include at least one value")
-    return values
 
 
 def _int_env(name: str, default: int) -> int:

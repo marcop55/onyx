@@ -30,7 +30,6 @@ _REQUIRED_ENV = {
     MATTERMOST_BOT_TOKEN_ENV: "mattermost-secret-token",
     MATTERMOST_BOT_PERSONA_ID_ENV: "7",
     MATTERMOST_BOT_USER_ID_ENV: "bot_user_1",
-    MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV: "channel_1, channel_2",
 }
 
 
@@ -73,7 +72,6 @@ def _mattermost_env(values: dict[str, str]) -> Iterator[None]:
         MATTERMOST_BOT_TOKEN_ENV,
         MATTERMOST_BOT_PERSONA_ID_ENV,
         MATTERMOST_BOT_USER_ID_ENV,
-        MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV,
     ],
 )
 def test_missing_required_config_blocks_startup(missing_env: str) -> None:
@@ -90,6 +88,7 @@ def test_load_mattermost_bot_config_from_env() -> None:
     with _mattermost_env(
         {
             **_REQUIRED_ENV,
+            MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV: "channel_1, channel_2",
             "MATTERMOST_BOT_ALLOWED_TEAM_IDS": "team_1",
             "MATTERMOST_BOT_APPROVED_USER_IDS": "user_1,user_2",
             "MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS": "channel_2",
@@ -113,6 +112,15 @@ def test_load_mattermost_bot_config_from_env() -> None:
     assert config.listener_config.allowed_team_ids == frozenset({"team_1"})
     assert config.listener_config.approved_user_ids == frozenset({"user_1", "user_2"})
     assert config.listener_config.root_post_channel_ids == frozenset({"channel_2"})
+
+
+def test_empty_emergency_restrictions_are_valid() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+
+    assert config.listener_config.allowed_channel_ids == frozenset()
+    assert config.listener_config.allowed_team_ids == frozenset()
+    assert config.listener_config.approved_user_ids == frozenset()
 
 
 def test_redacted_mattermost_bot_env_never_returns_token_value() -> None:

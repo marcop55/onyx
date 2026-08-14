@@ -1,11 +1,15 @@
 """Unit tests for Mattermost listener normalization."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import cast
 
 import pytest
 
-from onyx.onyxbot.mattermost.client import mattermost_event_from_payload
+from onyx.onyxbot.mattermost.client import (
+    MattermostClientError,
+    mattermost_event_from_payload,
+)
 from onyx.onyxbot.mattermost.listener import (
     MattermostEventListener,
     MattermostEventNormalizer,
@@ -174,7 +178,9 @@ def _posted_event(
 
 
 def test_direct_message_emits_normalized_event_without_mention() -> None:
-    normalizer = MattermostEventNormalizer(_config())
+    normalizer = MattermostEventNormalizer(
+        _config(allowed_channel_ids=frozenset(), allowed_team_ids=frozenset())
+    )
 
     event = normalizer.normalize(
         _posted_event(
@@ -538,6 +544,249 @@ class _FlakyClient:
         if self.calls <= 2:
             raise RuntimeError("connection dropped")
         yield self._envelope
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        _ = channel_id, user_id
+        return True
+
+
+class _MembershipClient:
+    def __init__(
+        self,
+        envelope: MattermostEventEnvelope,
+        memberships: dict[tuple[str, str], bool],
+        *,
+        fail_membership_lookup: bool = False,
+    ) -> None:
+        self._envelope = envelope
+        self._memberships = memberships
+        self._fail_membership_lookup = fail_membership_lookup
+        self.membership_checks: list[tuple[str, str]] = []
+
+    async def connect_events(self) -> AsyncIterator[MattermostEventEnvelope]:
+        yield self._envelope
+        await asyncio.Event().wait()
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        self.membership_checks.append((channel_id, user_id))
+        if self._fail_membership_lookup:
+            raise MattermostClientError("membership lookup failed")
+        return self._memberships.get((channel_id, user_id), False)
+
+
+class _ChangingMembershipClient:
+    def __init__(
+        self,
+        envelopes: list[MattermostEventEnvelope],
+        membership_snapshots: list[dict[tuple[str, str], bool]],
+    ) -> None:
+        self._envelopes = envelopes
+        self._membership_snapshots = membership_snapshots
+        self.membership_checks: list[tuple[str, str]] = []
+
+    async def connect_events(self) -> AsyncIterator[MattermostEventEnvelope]:
+        for envelope in self._envelopes:
+            yield envelope
+        await asyncio.Event().wait()
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        self.membership_checks.append((channel_id, user_id))
+        snapshot_index = min(
+            max((len(self.membership_checks) - 1) // 2, 0),
+            len(self._membership_snapshots) - 1,
+        )
+        return self._membership_snapshots[snapshot_index].get(
+            (channel_id, user_id), False
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel_type", "channel_id", "team_id", "expected_event_type"),
+    [
+        (
+            "O",
+            "public_channel_1",
+            "team_1",
+            MattermostNormalizedEventType.CHANNEL_MENTION,
+        ),
+        (
+            "P",
+            "private_channel_1",
+            "team_1",
+            MattermostNormalizedEventType.CHANNEL_MENTION,
+        ),
+        ("D", "dm_channel_1", "global", MattermostNormalizedEventType.DIRECT_MESSAGE),
+    ],
+)
+async def test_listener_authorizes_events_with_current_membership(
+    channel_type: str,
+    channel_id: str,
+    team_id: str,
+    expected_event_type: MattermostNormalizedEventType,
+) -> None:
+    envelope = _posted_event(
+        post_id=f"post_{channel_id}",
+        message="@onyx help" if channel_type != "D" else "help",
+        channel_id=channel_id,
+        channel_type=channel_type,
+        team_id=team_id,
+    )
+    client = _MembershipClient(
+        envelope,
+        {
+            (channel_id, _APPROVED_USER_ID): True,
+            (channel_id, _BOT_USER_ID): True,
+        },
+    )
+    listener = MattermostEventListener(
+        client,
+        _config(
+            allowed_channel_ids=frozenset(),
+            allowed_team_ids=frozenset(),
+            approved_user_ids=frozenset(),
+        ),
+    )
+
+    event = await anext(listener.normalized_events())
+
+    assert event.event_type == expected_event_type
+    assert client.membership_checks == [
+        (channel_id, _BOT_USER_ID),
+        (channel_id, _APPROVED_USER_ID),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "memberships",
+    [
+        {("channel_1", _BOT_USER_ID): True, ("channel_1", _APPROVED_USER_ID): False},
+        {("channel_1", _BOT_USER_ID): False, ("channel_1", _APPROVED_USER_ID): True},
+    ],
+)
+async def test_listener_rejects_when_sender_or_bot_is_not_a_current_member(
+    memberships: dict[tuple[str, str], bool],
+) -> None:
+    listener = MattermostEventListener(
+        _MembershipClient(
+            _posted_event(post_id="post_root_1", message="@onyx help"),
+            memberships,
+        ),
+        _config(approved_user_ids=frozenset()),
+    )
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(listener.normalized_events()), timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_listener_rejects_when_membership_api_fails() -> None:
+    listener = MattermostEventListener(
+        _MembershipClient(
+            _posted_event(post_id="post_root_1", message="@onyx help"),
+            {},
+            fail_membership_lookup=True,
+        ),
+        _config(approved_user_ids=frozenset()),
+    )
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(listener.normalized_events()), timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_listener_rechecks_membership_before_each_event() -> None:
+    first_envelope = _posted_event(
+        post_id="post_root_1",
+        message="@onyx first",
+        event_id="event_first",
+    )
+    removed_sender_envelope = _posted_event(
+        post_id="post_root_2",
+        message="@onyx second",
+        event_id="event_after_sender_removed",
+    )
+    client = _ChangingMembershipClient(
+        [first_envelope, removed_sender_envelope],
+        [
+            {("channel_1", _BOT_USER_ID): True, ("channel_1", _APPROVED_USER_ID): True},
+            {
+                ("channel_1", _BOT_USER_ID): True,
+                ("channel_1", _APPROVED_USER_ID): False,
+            },
+        ],
+    )
+    event_stream = MattermostEventListener(
+        client,
+        _config(approved_user_ids=frozenset()),
+    ).normalized_events()
+
+    first_event = await anext(event_stream)
+
+    assert first_event.post_id == "post_root_1"
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(event_stream), timeout=0.01)
+    assert client.membership_checks == [
+        ("channel_1", _BOT_USER_ID),
+        ("channel_1", _APPROVED_USER_ID),
+        ("channel_1", _BOT_USER_ID),
+        ("channel_1", _APPROVED_USER_ID),
+    ]
+
+
+def test_empty_emergency_restrictions_do_not_reject_valid_members() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            allowed_channel_ids=frozenset(),
+            allowed_team_ids=frozenset(),
+            approved_user_ids=frozenset(),
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_root_1",
+            message="@onyx help",
+            channel_id="newly_invited_channel",
+            team_id="new_team",
+            user_id="new_user",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.CHANNEL_MENTION
+
+
+def test_optional_emergency_restrictions_can_narrow_access() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            allowed_channel_ids=frozenset({"channel_1"}),
+            allowed_team_ids=frozenset({"team_1"}),
+            approved_user_ids=frozenset({_APPROVED_USER_ID}),
+        )
+    )
+
+    assert (
+        normalizer.normalize(
+            _posted_event(
+                post_id="restricted_channel",
+                message="@onyx help",
+                channel_id="other_channel",
+            )
+        )
+        is None
+    )
+    assert (
+        normalizer.normalize(
+            _posted_event(
+                post_id="restricted_user",
+                message="@onyx help",
+                user_id="other_user",
+            )
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

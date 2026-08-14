@@ -41,8 +41,8 @@ The adapter must accept only these event classes for the PoC:
 | Event class | Mattermost primitive | Required behavior |
 | --- | --- | --- |
 | Direct message post | `posted` event where `channel_type` is `D` | Respond without requiring a bot mention. Use the DM session key. |
-| Channel mention post | `posted` event where text mentions the bot in an allowlisted public or private channel | Respond in the post thread. Remove the mention from the query text. |
-| Root allowlisted post | `posted` event in an allowlisted channel when config permits root questions without mention | Respond in the post thread. This is optional per channel config. |
+| Channel mention post | `posted` event where text mentions the bot in a public or private channel where both sender and bot are current members | Respond in the post thread. Remove the mention from the query text. Optional emergency channel/team/user restrictions may narrow access. |
+| Root allowlisted post | `posted` event in a member-authorized channel when config permits root questions without mention | Respond in the post thread. This is optional per channel config. |
 | Thread reply followup | `posted` event with a non-empty `root_id` in a thread already owned by the adapter | Continue the existing Onyx session without requiring a new mention. |
 | Post update retry target | `post_edited` or an explicit retry action against an adapter-owned root post | Re-run the current thread request only when the action comes from an approved tester. |
 | Reaction feedback | `reaction_added` or interactive feedback action on an adapter answer post | Record like/dislike feedback against the related Onyx chat message. |
@@ -100,8 +100,8 @@ If a reply has no `root_id`, treat it as a root post and use its `id` as `root_p
 
 | Slack capability | Slack primitive | Mattermost primitive | Mattermost contract |
 | --- | --- | --- | --- |
-| Direct message | `message` with `channel_type=im` | `posted` in channel type `D` | Always eligible for approved testers. Session key is `mattermost:dm:{team_id}:{channel_id}`. |
-| Explicit channel mention | `app_mention` or bot user tag in `message` | `posted` containing `@bot` or bot user mention token | Eligible only in allowlisted channels. Strip the mention before sending text to Onyx. |
+| Direct message | `message` with `channel_type=im` | `posted` in channel type `D` | Eligible when both sender and bot are current DM channel members. Session key is `mattermost:dm:{team_id}:{channel_id}`. |
+| Explicit channel mention | `app_mention` or bot user tag in `message` | `posted` containing `@bot` or bot user mention token | Eligible when both sender and bot are current channel members. Strip the mention before sending text to Onyx. |
 | Thread followup | `message` with `thread_ts` | `posted` with `root_id` | Continue the root session when the root is adapter-owned. |
 | Root post answer | Slack channel config can permit non-mentions | Allowlisted channel config can permit root questions | Disabled by default. If enabled, respond to root posts only, not all thread chatter. |
 | Socket/event dedupe | Slack event envelope and message timestamps | Mattermost event ID/sequence, then `post_id:event_type` fallback | Store enough dedupe state to avoid duplicate Onyx messages and duplicate posts. |
@@ -110,7 +110,7 @@ If a reply has no `root_id`, treat it as a root post and use its `id` as `root_p
 | Actions | Slack block actions | Mattermost interactive message actions or reaction fallback | Support retry and feedback. Degrade to command/reaction fallback when interactive actions are unavailable. |
 | Feedback | Slack like/dislike block actions | Reaction or interactive feedback action | Map to Onyx chat-message feedback with Mattermost user attribution. |
 | Visible failures | Thread response or ephemeral message | Thread reply from bot | Post a concise failure in the thread when processing fails after acknowledgement. |
-| Allowlist | Slack channel config | Mattermost channel/team allowlist config | Channel mention/root behavior must be deny-by-default outside configured channels. |
+| Authorization | Slack channel config | Mattermost channel membership API plus optional channel/team/user restrictions | Membership lookup is the fail-closed boundary. Empty restrictions allow any channel/DM where both sender and bot are current members. |
 | Bot-loop prevention | Ignore own Slack bot IDs | Ignore Mattermost bot user/integration user IDs | Never process the adapter's own posts. |
 
 ## Streaming model
@@ -157,7 +157,8 @@ same Onyx chat message.
 Failures must be visible and bounded:
 
 - Duplicate events must not create duplicate Onyx messages or duplicate Mattermost posts.
-- Invalid or non-allowlisted channel events must be ignored.
+- Events must be ignored when the bot or sender is no longer a current channel member, or when the membership API cannot prove membership.
+- Optional channel/team/user restrictions narrow access only when configured; empty restrictions do not reject valid members.
 - Missing configured persona or shared service identity must fail loudly at startup or first use.
 - Onyx API failure after event acknowledgement must post one thread failure message.
 - Mattermost API rate limits must retry with bounded backoff.
@@ -179,8 +180,9 @@ channel mention routing, thread follow-up continuity, citation rendering, single
 updates, reaction feedback mapping, and replay deduplication without contacting Mattermost.
 
 Live disposable Mattermost verification is gated on separate test credentials. Required secret names
-are `MATTERMOST_BOT_URL`, `MATTERMOST_BOT_TOKEN`, `MATTERMOST_BOT_PERSONA_ID`,
-`MATTERMOST_BOT_USER_ID`, and `MATTERMOST_BOT_ALLOWED_CHANNEL_IDS`. Optional scope controls are
-`MATTERMOST_BOT_ALLOWED_TEAM_IDS`, `MATTERMOST_BOT_APPROVED_USER_IDS`, and
-`MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS`. These values must point to a disposable test bot and test
-channel only.
+are `MATTERMOST_BOT_URL`, `MATTERMOST_BOT_TOKEN`, `MATTERMOST_BOT_PERSONA_ID`, and
+`MATTERMOST_BOT_USER_ID`. Optional emergency narrowing controls are
+`MATTERMOST_BOT_ALLOWED_CHANNEL_IDS`, `MATTERMOST_BOT_ALLOWED_TEAM_IDS`,
+`MATTERMOST_BOT_APPROVED_USER_IDS`, and `MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS`. Empty channel,
+team, and user restrictions mean membership-based access. These values must point to a disposable
+test bot and test channel only.
