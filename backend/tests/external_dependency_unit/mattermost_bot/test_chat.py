@@ -137,6 +137,8 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
     )
     assert stream_request.parent_message_id == 11
     assert stream_request.origin.value == "mattermostbot"
+    assert mock_handle_stream.call_args.kwargs["user"] is service_user
+    assert mock_handle_stream.call_args.kwargs["bypass_acl"] is False
     assert owned_thread_root_ids == {"post-root-1"}
     assert owned_answer_post_root_ids == {"bot-post-1": "post-root-1"}
     assert owned_answer_post_message_ids == {"bot-post-1": 22}

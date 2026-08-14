@@ -129,6 +129,7 @@ async def stream_mattermost_answer(
         raise MattermostStreamVisibleError(str(exc)) from exc
 
     if message_id is None:
+        _require_owner_fence(before_external_update)
         await _show_failure(
             client=client,
             post_id=post_id,

@@ -184,6 +184,23 @@ async def test_stream_stops_before_partial_update_when_owner_fence_is_lost() -> 
 
 
 @pytest.mark.asyncio
+async def test_missing_message_id_failure_is_fenced_before_external_put() -> None:
+    client = _RecordingClient()
+
+    with pytest.raises(MattermostLeaseLostError, match="lease"):
+        await stream_mattermost_answer(
+            client=client,
+            channel_id="channel-1",
+            root_id="root-post-1",
+            post_id="existing-post",
+            packets=iter([]),
+            before_external_update=lambda: False,
+        )
+
+    assert client.updated_posts == []
+
+
+@pytest.mark.asyncio
 async def test_stream_mattermost_answer_rate_bounds_partial_updates() -> None:
     client = _RecordingClient()
     packets = iter(

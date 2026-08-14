@@ -9,7 +9,6 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from onyx.auth.users import get_anonymous_user
 from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
 from onyx.configs.constants import MessageType, QAFeedbackType
@@ -454,7 +453,7 @@ def _stream_mattermost_answer_packets(
         try:
             yield from handle_stream_message_objects(
                 new_msg_req=new_message_request,
-                user=get_anonymous_user(),
+                user=service_user,
                 bypass_acl=False,
                 additional_context=_build_mattermost_context(event),
                 external_idempotency_key=external_idempotency_key,
