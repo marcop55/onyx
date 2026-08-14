@@ -19,7 +19,9 @@ from onyx.server.query_and_chat.streaming_models import (
 )
 
 MATTERMOST_STREAM_PLACEHOLDER = "..."
-MATTERMOST_STREAM_FAILURE_SUFFIX = "Onyx stopped before it finished this answer. Try again later."
+MATTERMOST_STREAM_FAILURE_SUFFIX = (
+    "Onyx stopped before it finished this answer. Try again later."
+)
 MATTERMOST_MIN_UPDATE_CHARS = 80
 
 
