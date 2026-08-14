@@ -25,6 +25,7 @@ class MessageOrigin(str, Enum):
     SLACKBOT = "slackbot"
     WIDGET = "widget"
     DISCORDBOT = "discordbot"
+    MATTERMOSTBOT = "mattermostbot"
     MOBILE = "mobile"
     UNKNOWN = "unknown"
     UNSET = "unset"
