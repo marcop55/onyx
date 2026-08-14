@@ -486,6 +486,59 @@ services:
     # uncomment below + comment out the above to use the `docker-in-docker` execution mode
     # privileged: true
 
+  # Optional private Mattermost bot service. It starts only when
+  # COMPOSE_PROFILES includes mattermost-bot and fails closed without config.
+  mattermost_bot:
+    image: ${ONYX_BACKEND_IMAGE:-onyxdotapp/onyx-backend:${IMAGE_TAG:-latest}}
+    profiles: ["mattermost-bot"]
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["python", "-m", "onyx.onyxbot.mattermost.run"]
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      api_server:
+        condition: service_healthy
+      relational_db:
+        condition: service_started
+      opensearch:
+        condition: service_started
+      cache:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST:-relational_db}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-opensearch}
+      - OPENSEARCH_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD:-StrongPassword123!}
+      - REDIS_HOST=${REDIS_HOST:-cache}
+      - MODEL_SERVER_HOST=${MODEL_SERVER_HOST:-inference_model_server}
+      - MATTERMOST_BOT_URL=${MATTERMOST_BOT_URL:?set MATTERMOST_BOT_URL to enable the private Mattermost bot}
+      - MATTERMOST_BOT_TOKEN=${MATTERMOST_BOT_TOKEN:?set MATTERMOST_BOT_TOKEN to enable the private Mattermost bot}
+      - MATTERMOST_BOT_PERSONA_ID=${MATTERMOST_BOT_PERSONA_ID:?set MATTERMOST_BOT_PERSONA_ID to enable the private Mattermost bot}
+      - MATTERMOST_BOT_USER_ID=${MATTERMOST_BOT_USER_ID:?set MATTERMOST_BOT_USER_ID to enable the private Mattermost bot}
+      - MATTERMOST_BOT_ALLOWED_CHANNEL_IDS=${MATTERMOST_BOT_ALLOWED_CHANNEL_IDS:?set MATTERMOST_BOT_ALLOWED_CHANNEL_IDS to enable the private Mattermost bot}
+      - MATTERMOST_BOT_ALLOWED_TEAM_IDS=${MATTERMOST_BOT_ALLOWED_TEAM_IDS:-}
+      - MATTERMOST_BOT_APPROVED_USER_IDS=${MATTERMOST_BOT_APPROVED_USER_IDS:-}
+      - MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS=${MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS:-}
+      - MATTERMOST_BOT_MENTIONS=${MATTERMOST_BOT_MENTIONS:-@onyx}
+      - MATTERMOST_BOT_HOST=${MATTERMOST_BOT_HOST:-127.0.0.1}
+      - MATTERMOST_BOT_PORT=${MATTERMOST_BOT_PORT:-8091}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health')",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
 volumes:
   # Necessary for persisting data for use
   db_volume:
