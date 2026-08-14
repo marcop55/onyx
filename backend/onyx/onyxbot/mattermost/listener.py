@@ -182,6 +182,7 @@ class MattermostEventNormalizer:
         root_post_id = self._config.owned_answer_post_root_ids.get(reaction.post_id)
         if root_post_id is None:
             return None
+        message_id = self._config.owned_answer_post_message_ids.get(reaction.post_id)
 
         feedback_action = _feedback_action_from_emoji(reaction.emoji_name)
         if feedback_action is None:
@@ -199,9 +200,15 @@ class MattermostEventNormalizer:
             metadata={
                 "feedback_answer_post_id": reaction.post_id,
                 "feedback_action": feedback_action.value,
+                **(
+                    {"feedback_message_id": str(message_id)}
+                    if message_id is not None
+                    else {}
+                ),
             },
             feedback_answer_post_id=reaction.post_id,
             feedback_action=feedback_action,
+            feedback_message_id=message_id,
         )
 
     def _build_channel_event(

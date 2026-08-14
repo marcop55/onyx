@@ -6,7 +6,11 @@ from uuid import UUID
 import pytest
 
 from onyx.chat.models import ChatBasicResponse
-from onyx.configs.constants import MATTERMOST_SERVICE_ACCOUNT_EMAIL, DocumentSource
+from onyx.configs.constants import (
+    MATTERMOST_SERVICE_ACCOUNT_EMAIL,
+    DocumentSource,
+    QAFeedbackType,
+)
 from onyx.context.search.models import SearchDoc
 from onyx.db.models import User
 from onyx.db.users import get_or_create_mattermost_service_account
@@ -31,9 +35,13 @@ from onyx.server.query_and_chat.streaming_models import (
 
 
 @pytest.mark.asyncio
-async def test_root_mention_creates_chat_with_configured_persona_and_posts_answer(
-) -> None:
+async def test_root_mention_creates_chat_with_configured_persona_and_posts_answer() -> (
+    None
+):
     db_session = MagicMock()
+    owned_thread_root_ids: set[str] = set()
+    owned_answer_post_root_ids: dict[str, str] = {}
+    owned_answer_post_message_ids: dict[str, int] = {}
     event = _event(
         event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
         post_id="post-root-1",
@@ -44,7 +52,12 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
     client.create_post = AsyncMock()
     client.create_post.return_value.id = "bot-post-1"
     client.update_post = AsyncMock()
-    config = MattermostHandlerConfig(persona_id=456)
+    config = MattermostHandlerConfig(
+        persona_id=456,
+        owned_thread_root_ids=owned_thread_root_ids,
+        owned_answer_post_root_ids=owned_answer_post_root_ids,
+        owned_answer_post_message_ids=owned_answer_post_message_ids,
+    )
     service_user = MagicMock()
     service_user.id = UUID("00000000-0000-0000-0000-000000000456")
     target = _target()
@@ -101,9 +114,14 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
     )
     stream_request = mock_handle_stream.call_args.kwargs["new_msg_req"]
     assert stream_request.message == "what changed?"
-    assert stream_request.chat_session_id == UUID("00000000-0000-0000-0000-000000000001")
+    assert stream_request.chat_session_id == UUID(
+        "00000000-0000-0000-0000-000000000001"
+    )
     assert stream_request.parent_message_id == 11
     assert stream_request.origin.value == "mattermostbot"
+    assert owned_thread_root_ids == {"post-root-1"}
+    assert owned_answer_post_root_ids == {"bot-post-1": "post-root-1"}
+    assert owned_answer_post_message_ids == {"bot-post-1": 22}
     client.create_post.assert_awaited_once_with(
         channel_id="channel-1",
         root_id="post-root-1",
@@ -174,7 +192,9 @@ async def test_reply_continues_existing_parent_message() -> None:
 
     assert handled is True
     stream_request = mock_handle_stream.call_args.kwargs["new_msg_req"]
-    assert stream_request.chat_session_id == UUID("00000000-0000-0000-0000-000000000001")
+    assert stream_request.chat_session_id == UUID(
+        "00000000-0000-0000-0000-000000000001"
+    )
     assert stream_request.parent_message_id == 11
     assert stream_request.message == "can you expand?"
 
@@ -211,6 +231,44 @@ async def test_failure_posts_safe_thread_message() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_reaction_feedback_records_chat_message_feedback() -> None:
+    db_session = MagicMock()
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.REACTION_FEEDBACK,
+        session_key="mattermost:channel:team-1:channel-1:post-root-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="bot-answer-1",
+        root_post_id="post-root-1",
+        user_id="user-1",
+        raw_event_type="reaction_added",
+        feedback_answer_post_id="bot-answer-1",
+        feedback_action=QAFeedbackType.LIKE,
+        feedback_message_id=22,
+    )
+    client = MagicMock()
+
+    with patch(
+        "onyx.onyxbot.mattermost.handler.create_chat_message_feedback"
+    ) as mock_feedback:
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=db_session,
+        )
+
+    assert handled is True
+    mock_feedback.assert_called_once_with(
+        is_positive=True,
+        feedback_text="Mattermost feedback from user-1",
+        chat_message_id=22,
+        user_id=None,
+        db_session=db_session,
+    )
+
+
 def test_format_mattermost_answer_preserves_citations() -> None:
     answer = _answer(
         message_id=44,
@@ -221,7 +279,10 @@ def test_format_mattermost_answer_preserves_citations() -> None:
 
     formatted = format_mattermost_answer(answer)
 
-    assert formatted == "Use this [1].\n\nSources:\n[1] Mattermost Doc - https://example.test/doc"
+    assert (
+        formatted
+        == "Use this [1].\n\nSources:\n[1] Mattermost Doc - https://example.test/doc"
+    )
 
 
 def test_create_mattermost_service_account() -> None:
