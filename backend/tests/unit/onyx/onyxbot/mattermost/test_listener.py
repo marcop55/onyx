@@ -29,8 +29,9 @@ def _config(**overrides: object) -> MattermostListenerConfig:
         allowed_team_ids=frozenset({"team_1"}),
         approved_user_ids=frozenset({_APPROVED_USER_ID}),
         root_post_channel_ids=frozenset({"channel_2"}),
-        owned_thread_root_ids=frozenset({"post_root_1"}),
+        owned_thread_root_ids={"post_root_1"},
         owned_answer_post_root_ids={"bot_answer_1": "post_root_1"},
+        owned_answer_post_message_ids={"bot_answer_1": 22},
         initial_reconnect_backoff_seconds=1.0,
         max_reconnect_backoff_seconds=3.0,
     )
@@ -55,13 +56,18 @@ def _config(**overrides: object) -> MattermostListenerConfig:
         root_post_channel_ids=_frozenset_override(
             overrides, "root_post_channel_ids", config.root_post_channel_ids
         ),
-        owned_thread_root_ids=_frozenset_override(
+        owned_thread_root_ids=_set_override(
             overrides, "owned_thread_root_ids", config.owned_thread_root_ids
         ),
         owned_answer_post_root_ids=_dict_override(
             overrides,
             "owned_answer_post_root_ids",
             config.owned_answer_post_root_ids,
+        ),
+        owned_answer_post_message_ids=_int_dict_override(
+            overrides,
+            "owned_answer_post_message_ids",
+            config.owned_answer_post_message_ids,
         ),
         initial_reconnect_backoff_seconds=_float_override(
             overrides,
@@ -89,6 +95,19 @@ def _frozenset_override(
     raise TypeError(f"{key} must be a frozenset")
 
 
+def _set_override(
+    overrides: dict[str, object],
+    key: str,
+    default: set[str],
+) -> set[str]:
+    value = overrides.get(key)
+    if value is None:
+        return default
+    if isinstance(value, set):
+        return cast(set[str], value)
+    raise TypeError(f"{key} must be a set")
+
+
 def _float_override(overrides: dict[str, object], key: str, default: float) -> float:
     value = overrides.get(key)
     if value is None:
@@ -108,6 +127,19 @@ def _dict_override(
         return default
     if isinstance(value, dict):
         return cast(dict[str, str], value)
+    raise TypeError(f"{key} must be a dict")
+
+
+def _int_dict_override(
+    overrides: dict[str, object],
+    key: str,
+    default: dict[str, int],
+) -> dict[str, int]:
+    value = overrides.get(key)
+    if value is None:
+        return default
+    if isinstance(value, dict):
+        return cast(dict[str, int], value)
     raise TypeError(f"{key} must be a dict")
 
 
@@ -378,9 +410,11 @@ def test_real_reaction_added_payload_emits_typed_feedback_event() -> None:
     assert event.root_post_id == "post_root_1"
     assert event.feedback_answer_post_id == "bot_answer_1"
     assert event.feedback_action == "like"
+    assert event.feedback_message_id == 22
     assert event.metadata == {
         "feedback_answer_post_id": "bot_answer_1",
         "feedback_action": "like",
+        "feedback_message_id": "22",
     }
 
 
@@ -413,7 +447,11 @@ def test_reaction_feedback_fallback_dedupe_uses_answer_post_id() -> None:
             owned_answer_post_root_ids={
                 "bot_answer_1": "post_root_1",
                 "bot_answer_2": "post_root_1",
-            }
+            },
+            owned_answer_post_message_ids={
+                "bot_answer_1": 22,
+                "bot_answer_2": 23,
+            },
         )
     )
     first_envelope = mattermost_event_from_payload(

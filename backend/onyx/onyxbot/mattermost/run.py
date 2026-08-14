@@ -54,7 +54,12 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
 
 
 async def _run_bot(config: MattermostBotConfig) -> None:
-    handler_config = MattermostHandlerConfig(persona_id=config.persona_id)
+    handler_config = MattermostHandlerConfig(
+        persona_id=config.persona_id,
+        owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
+        owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,
+        owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
+    )
     async with MattermostClient(
         config.url,
         config.token,

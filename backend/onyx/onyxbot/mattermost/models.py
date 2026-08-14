@@ -68,8 +68,9 @@ class MattermostListenerConfig:
     allowed_team_ids: frozenset[str] = frozenset()
     approved_user_ids: frozenset[str] = frozenset()
     root_post_channel_ids: frozenset[str] = frozenset()
-    owned_thread_root_ids: frozenset[str] = frozenset()
+    owned_thread_root_ids: set[str] = field(default_factory=set)
     owned_answer_post_root_ids: dict[str, str] = field(default_factory=dict)
+    owned_answer_post_message_ids: dict[str, int] = field(default_factory=dict)
     bot_user_ids: frozenset[str] = frozenset()
     max_seen_event_ids: int = 10_000
     initial_reconnect_backoff_seconds: float = 1.0
@@ -97,3 +98,4 @@ class NormalizedMattermostEvent:
     metadata: dict[str, str] = field(default_factory=dict)
     feedback_answer_post_id: str | None = None
     feedback_action: QAFeedbackType | None = None
+    feedback_message_id: int | None = None
