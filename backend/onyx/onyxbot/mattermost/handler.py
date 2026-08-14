@@ -330,6 +330,10 @@ async def handle_normalized_mattermost_event(
         return False
     except MattermostLeaseLostError:
         return False
+    except MattermostClientError:
+        # Once a durable answer post exists, any transport outcome is ambiguous.
+        # Fail closed so the same post can be reconciled/resumed on replay.
+        return False
     except Exception:
         await _post_failure(
             client=client, event=event, message=MATTERMOST_FAILURE_MESSAGE

@@ -473,8 +473,17 @@ def test_turn_checkpoint_lease_loss_uses_fenced_error() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "stream_error",
+    [
+        MattermostLeaseLostError("lease lost"),
+        MattermostClientError("final update outcome ambiguous"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_lease_loss_never_emits_unfenced_failure_post() -> None:
+async def test_fenced_or_transport_stream_failure_never_emits_fallback_post(
+    stream_error: Exception,
+) -> None:
     from onyx.onyxbot.mattermost.handler import (
         MattermostHandlerConfig,
         handle_normalized_mattermost_event,
@@ -522,7 +531,7 @@ async def test_lease_loss_never_emits_unfenced_failure_post() -> None:
         ),
         patch(
             "onyx.onyxbot.mattermost.handler.stream_mattermost_answer",
-            side_effect=MattermostLeaseLostError("lease lost"),
+            side_effect=stream_error,
         ),
     ):
         handled = await handle_normalized_mattermost_event(
