@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
+from onyx.configs.constants import QAFeedbackType
+
 MattermostChannelType = Literal["D", "O", "P"]
 
 
@@ -32,6 +34,16 @@ class MattermostPost:
 
 
 @dataclass(frozen=True)
+class MattermostReaction:
+    """Mattermost reaction fields used by feedback handling."""
+
+    user_id: str
+    post_id: str
+    emoji_name: str
+    channel_id: str = ""
+
+
+@dataclass(frozen=True)
 class MattermostEventEnvelope:
     """Mattermost WebSocket event data normalized for decision logic."""
 
@@ -41,6 +53,7 @@ class MattermostEventEnvelope:
     team_id: str = "global"
     user_id: str = ""
     post: MattermostPost | None = None
+    reaction: MattermostReaction | None = None
     event_id: str | None = None
     sequence: int | None = None
 
@@ -56,6 +69,7 @@ class MattermostListenerConfig:
     approved_user_ids: frozenset[str] = frozenset()
     root_post_channel_ids: frozenset[str] = frozenset()
     owned_thread_root_ids: frozenset[str] = frozenset()
+    owned_answer_post_root_ids: dict[str, str] = field(default_factory=dict)
     bot_user_ids: frozenset[str] = frozenset()
     max_seen_event_ids: int = 10_000
     initial_reconnect_backoff_seconds: float = 1.0
@@ -81,3 +95,5 @@ class NormalizedMattermostEvent:
     text: str = ""
     raw_event_type: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
+    feedback_answer_post_id: str | None = None
+    feedback_action: QAFeedbackType | None = None

@@ -6,6 +6,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol
 
+from onyx.configs.constants import QAFeedbackType
 from onyx.onyxbot.mattermost.models import (
     MattermostEventEnvelope,
     MattermostListenerConfig,
@@ -46,6 +47,9 @@ class MattermostEventNormalizer:
             "post_deleted",
         }:
             return None
+
+        if envelope.event == "reaction_added":
+            return self._normalize_reaction_feedback(envelope)
 
         post = envelope.post
         if post is None:
@@ -140,20 +144,6 @@ class MattermostEventNormalizer:
                 text=stripped_text,
             )
 
-        if envelope.event == "reaction_added":
-            if root_post_id not in self._config.owned_thread_root_ids:
-                return None
-            return self._build_channel_event(
-                MattermostNormalizedEventType.REACTION_FEEDBACK,
-                envelope,
-                post,
-                user_id=user_id,
-                team_id=team_id,
-                channel_id=channel_id,
-                root_post_id=root_post_id,
-                text=text,
-            )
-
         if envelope.event == "post_deleted":
             if root_post_id not in self._config.owned_thread_root_ids:
                 return None
@@ -169,6 +159,50 @@ class MattermostEventNormalizer:
             )
 
         return None
+
+    def _normalize_reaction_feedback(
+        self,
+        envelope: MattermostEventEnvelope,
+    ) -> NormalizedMattermostEvent | None:
+        reaction = envelope.reaction
+        if reaction is None:
+            return None
+
+        user_id = envelope.user_id or reaction.user_id
+        if user_id in self._config.bot_user_ids:
+            return None
+        if not self._is_approved_user(user_id):
+            return None
+
+        team_id = envelope.team_id or "global"
+        channel_id = envelope.channel_id or reaction.channel_id
+        if not channel_id or not self._is_allowed_channel(team_id, channel_id):
+            return None
+
+        root_post_id = self._config.owned_answer_post_root_ids.get(reaction.post_id)
+        if root_post_id is None:
+            return None
+
+        feedback_action = _feedback_action_from_emoji(reaction.emoji_name)
+        if feedback_action is None:
+            return None
+
+        return NormalizedMattermostEvent(
+            event_type=MattermostNormalizedEventType.REACTION_FEEDBACK,
+            session_key=(f"mattermost:channel:{team_id}:{channel_id}:{root_post_id}"),
+            team_id=team_id,
+            channel_id=channel_id,
+            post_id=reaction.post_id,
+            root_post_id=root_post_id,
+            user_id=user_id,
+            raw_event_type=envelope.event,
+            metadata={
+                "feedback_answer_post_id": reaction.post_id,
+                "feedback_action": feedback_action.value,
+            },
+            feedback_answer_post_id=reaction.post_id,
+            feedback_action=feedback_action,
+        )
 
     def _build_channel_event(
         self,
@@ -250,6 +284,8 @@ class MattermostEventNormalizer:
             return f"event_id:{envelope.event_id}"
         if envelope.sequence is not None:
             return f"seq:{envelope.sequence}"
+        if envelope.reaction is not None:
+            return f"fallback:{envelope.event}:{envelope.reaction.post_id}"
         post_id = envelope.post.id if envelope.post is not None else "none"
         return f"fallback:{envelope.event}:{post_id}"
 
@@ -262,6 +298,14 @@ class MattermostEventNormalizer:
         while len(self._seen_event_ids) > self._config.max_seen_event_ids:
             self._seen_event_ids.popitem(last=False)
         return False
+
+
+def _feedback_action_from_emoji(emoji_name: str) -> QAFeedbackType | None:
+    if emoji_name in {"+1", "thumbsup"}:
+        return QAFeedbackType.LIKE
+    if emoji_name in {"-1", "thumbsdown"}:
+        return QAFeedbackType.DISLIKE
+    return None
 
 
 class MattermostEventListener:

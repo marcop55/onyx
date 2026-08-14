@@ -30,6 +30,7 @@ def _config(**overrides: object) -> MattermostListenerConfig:
         approved_user_ids=frozenset({_APPROVED_USER_ID}),
         root_post_channel_ids=frozenset({"channel_2"}),
         owned_thread_root_ids=frozenset({"post_root_1"}),
+        owned_answer_post_root_ids={"bot_answer_1": "post_root_1"},
         initial_reconnect_backoff_seconds=1.0,
         max_reconnect_backoff_seconds=3.0,
     )
@@ -56,6 +57,11 @@ def _config(**overrides: object) -> MattermostListenerConfig:
         ),
         owned_thread_root_ids=_frozenset_override(
             overrides, "owned_thread_root_ids", config.owned_thread_root_ids
+        ),
+        owned_answer_post_root_ids=_dict_override(
+            overrides,
+            "owned_answer_post_root_ids",
+            config.owned_answer_post_root_ids,
         ),
         initial_reconnect_backoff_seconds=_float_override(
             overrides,
@@ -90,6 +96,19 @@ def _float_override(overrides: dict[str, object], key: str, default: float) -> f
     if isinstance(value, int | float):
         return float(value)
     raise TypeError(f"{key} must be numeric")
+
+
+def _dict_override(
+    overrides: dict[str, object],
+    key: str,
+    default: dict[str, str],
+) -> dict[str, str]:
+    value = overrides.get(key)
+    if value is None:
+        return default
+    if isinstance(value, dict):
+        return cast(dict[str, str], value)
+    raise TypeError(f"{key} must be a dict")
 
 
 def _posted_event(
@@ -260,7 +279,6 @@ def test_thread_reply_followup_emits_normalized_event_for_owned_thread() -> None
     ("raw_event_type", "expected_event_type"),
     [
         ("post_edited", MattermostNormalizedEventType.POST_UPDATE_RETRY),
-        ("reaction_added", MattermostNormalizedEventType.REACTION_FEEDBACK),
         ("post_deleted", MattermostNormalizedEventType.POST_DELETE_TOMBSTONE),
     ],
 )
@@ -331,6 +349,111 @@ def test_mattermost_websocket_payload_is_parsed_to_typed_event() -> None:
     assert envelope.post is not None
     assert envelope.post.id == "post_dm_1"
     assert envelope.post.message == "help"
+
+
+def test_real_reaction_added_payload_emits_typed_feedback_event() -> None:
+    envelope = mattermost_event_from_payload(
+        {
+            "event": "reaction_added",
+            "seq": 13,
+            "data": {
+                "reaction": {
+                    "user_id": _APPROVED_USER_ID,
+                    "post_id": "bot_answer_1",
+                    "emoji_name": "+1",
+                    "channel_id": "channel_1",
+                },
+                "team_id": "team_1",
+            },
+            "broadcast": {"channel_id": "channel_1", "team_id": "team_1"},
+        }
+    )
+    normalizer = MattermostEventNormalizer(_config())
+
+    event = normalizer.normalize(envelope)
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.REACTION_FEEDBACK
+    assert event.post_id == "bot_answer_1"
+    assert event.root_post_id == "post_root_1"
+    assert event.feedback_answer_post_id == "bot_answer_1"
+    assert event.feedback_action == "like"
+    assert event.metadata == {
+        "feedback_answer_post_id": "bot_answer_1",
+        "feedback_action": "like",
+    }
+
+
+def test_reaction_feedback_ignores_unowned_answer_posts() -> None:
+    envelope = mattermost_event_from_payload(
+        {
+            "event": "reaction_added",
+            "data": {
+                "reaction": {
+                    "user_id": _APPROVED_USER_ID,
+                    "post_id": "other_bot_post",
+                    "emoji_name": "+1",
+                    "channel_id": "channel_1",
+                },
+                "team_id": "team_1",
+            },
+            "broadcast": {"channel_id": "channel_1", "team_id": "team_1"},
+        }
+    )
+    normalizer = MattermostEventNormalizer(_config())
+
+    event = normalizer.normalize(envelope)
+
+    assert event is None
+
+
+def test_reaction_feedback_fallback_dedupe_uses_answer_post_id() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            owned_answer_post_root_ids={
+                "bot_answer_1": "post_root_1",
+                "bot_answer_2": "post_root_1",
+            }
+        )
+    )
+    first_envelope = mattermost_event_from_payload(
+        {
+            "event": "reaction_added",
+            "data": {
+                "reaction": {
+                    "user_id": _APPROVED_USER_ID,
+                    "post_id": "bot_answer_1",
+                    "emoji_name": "+1",
+                    "channel_id": "channel_1",
+                },
+                "team_id": "team_1",
+            },
+            "broadcast": {"channel_id": "channel_1", "team_id": "team_1"},
+        }
+    )
+    second_envelope = mattermost_event_from_payload(
+        {
+            "event": "reaction_added",
+            "data": {
+                "reaction": {
+                    "user_id": _APPROVED_USER_ID,
+                    "post_id": "bot_answer_2",
+                    "emoji_name": "+1",
+                    "channel_id": "channel_1",
+                },
+                "team_id": "team_1",
+            },
+            "broadcast": {"channel_id": "channel_1", "team_id": "team_1"},
+        }
+    )
+
+    first_event = normalizer.normalize(first_envelope)
+    replayed_event = normalizer.normalize(first_envelope)
+    second_event = normalizer.normalize(second_envelope)
+
+    assert first_event is not None
+    assert replayed_event is None
+    assert second_event is not None
 
 
 class _FlakyClient:

@@ -5,7 +5,11 @@ from typing import cast
 
 import aiohttp
 
-from onyx.onyxbot.mattermost.models import MattermostEventEnvelope, MattermostPost
+from onyx.onyxbot.mattermost.models import (
+    MattermostEventEnvelope,
+    MattermostPost,
+    MattermostReaction,
+)
 
 
 class MattermostClientError(Exception):
@@ -151,15 +155,18 @@ def mattermost_event_from_payload(
     broadcast = _object_mapping(payload.get("broadcast"))
 
     post = _post_from_payload(data.get("post"))
+    reaction = _reaction_from_payload(data.get("reaction"))
     channel_id = _first_present_string(
         data.get("channel_id"),
         broadcast.get("channel_id"),
+        reaction.channel_id if reaction else "",
         post.channel_id if post else "",
     )
     team_id = _first_present_string(data.get("team_id"), broadcast.get("team_id"))
     user_id = _first_present_string(
         data.get("user_id"),
         broadcast.get("user_id"),
+        reaction.user_id if reaction else "",
         post.user_id if post else "",
     )
     channel_type = _first_present_string(
@@ -175,6 +182,7 @@ def mattermost_event_from_payload(
         team_id=team_id or "global",
         user_id=user_id,
         post=post,
+        reaction=reaction,
         event_id=_string_value(payload.get("event_id")) or None,
         sequence=sequence if isinstance(sequence, int) else None,
     )
@@ -205,6 +213,19 @@ def _post_from_mapping(mapping: Mapping[object, object]) -> MattermostPost:
         root_id=_string_value(mapping.get("root_id")),
         parent_id=_string_value(mapping.get("parent_id")),
         user_id=_string_value(mapping.get("user_id")),
+        channel_id=_string_value(mapping.get("channel_id")),
+    )
+
+
+def _reaction_from_payload(value: object) -> MattermostReaction | None:
+    if not isinstance(value, dict):
+        return None
+
+    mapping = cast(Mapping[object, object], value)
+    return MattermostReaction(
+        user_id=_string_value(mapping.get("user_id")),
+        post_id=_string_value(mapping.get("post_id")),
+        emoji_name=_string_value(mapping.get("emoji_name")),
         channel_id=_string_value(mapping.get("channel_id")),
     )
 
