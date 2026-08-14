@@ -15,6 +15,7 @@ from onyx.configs.constants import MessageType, QAFeedbackType
 from onyx.db.chat import get_chat_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.mattermost_bot import (
+    MattermostThreadTombstonedError,
     get_mattermost_thread_mapping,
     record_mattermost_event_state,
     tombstone_mattermost_thread_mapping,
@@ -57,6 +58,7 @@ class MattermostHandlerConfig:
     onyx_user_id: UUID | None = None
     mock_llm_response: str | None = None
     owned_thread_root_ids: set[str] | None = None
+    tombstoned_thread_root_ids: set[str] | None = None
     owned_answer_post_root_ids: dict[str, str] | None = None
     owned_answer_post_message_ids: dict[str, int] | None = None
 
@@ -86,6 +88,8 @@ async def handle_normalized_mattermost_event(
         )
         if config.owned_thread_root_ids is not None:
             config.owned_thread_root_ids.discard(event.root_post_id)
+        if config.tombstoned_thread_root_ids is not None:
+            config.tombstoned_thread_root_ids.add(event.root_post_id)
         answer_post_ids = [
             answer_post_id
             for answer_post_id, root_id in (
@@ -142,6 +146,8 @@ async def handle_normalized_mattermost_event(
             root_id=_response_root_id(event),
             packets=packets,
         )
+    except MattermostThreadTombstonedError:
+        return False
     except ValueError:
         await _post_failure(
             client=client,

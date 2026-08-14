@@ -12,6 +12,7 @@ from onyx.configs.constants import MessageType
 from onyx.db.chat import create_new_chat_message
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import (
+    MattermostThreadTombstonedError,
     get_mattermost_chat_session_for_thread,
     get_mattermost_session_key,
     get_mattermost_thread_mapping,
@@ -409,6 +410,16 @@ def test_root_deletion_tombstone_preserves_history_and_is_not_rehydrated(
     assert db_session.get(ChatSession, chat_session_id) is not None
     assert parent_message_id is not None
     assert db_session.get(ChatMessage, parent_message_id) is not None
+    with pytest.raises(MattermostThreadTombstonedError):
+        get_or_create_mattermost_thread_mapping(
+            db_session=db_session,
+            server_id="mattermost-test-team-delete",
+            channel_id="channel-1",
+            root_id="root-delete",
+            mattermost_user_id="user-1",
+            persona_id=test_persona.id,
+            onyx_user_id=None,
+        )
 
     restarted_config = MattermostListenerConfig(
         bot_user_id="bot-1",
@@ -436,9 +447,27 @@ def test_root_deletion_tombstone_preserves_history_and_is_not_rehydrated(
             ),
         )
     )
+    mentioned_reply = restarted_listener.normalize(
+        MattermostEventEnvelope(
+            event="posted",
+            event_id="mentioned-event-after-delete",
+            channel_id="channel-1",
+            channel_type="O",
+            team_id="mattermost-test-team-delete",
+            user_id="user-1",
+            post=MattermostPost(
+                id="mentioned-reply-after-delete",
+                root_id="root-delete",
+                channel_id="channel-1",
+                user_id="user-1",
+                message="@onyx still should be ignored",
+            ),
+        )
+    )
 
     assert "root-delete" not in restarted_config.owned_thread_root_ids
     assert reply is None
+    assert mentioned_reply is None
 
 
 def test_model_matches_migration_shape(db_session: Session) -> None:

@@ -11,6 +11,10 @@ from onyx.onyxbot.mattermost.models import MattermostListenerConfig
 DEFAULT_MATTERMOST_TEAM_ID = "global"
 
 
+class MattermostThreadTombstonedError(RuntimeError):
+    """Raised when a deleted Mattermost root must not reclaim its Onyx history."""
+
+
 def get_mattermost_session_key(
     server_id: str,
     channel_id: str,
@@ -61,6 +65,10 @@ def get_or_create_mattermost_thread_mapping(
         root_id=root_id,
     )
     if existing_mapping is not None:
+        if not existing_mapping.is_active:
+            raise MattermostThreadTombstonedError(
+                "Deleted Mattermost thread cannot reclaim its Onyx session"
+            )
         return existing_mapping
 
     chat_session = create_chat_session(
@@ -111,6 +119,10 @@ def get_or_create_mattermost_thread_mapping(
     )
     if concurrent_mapping is None:
         raise RuntimeError("Failed to create Mattermost thread mapping")
+    if not concurrent_mapping.is_active:
+        raise MattermostThreadTombstonedError(
+            "Deleted Mattermost thread cannot reclaim its Onyx session"
+        )
     return concurrent_mapping
 
 
@@ -156,11 +168,12 @@ def hydrate_mattermost_listener_config(
     """Restore durable adapter ownership and replay state into runtime config."""
 
     mappings = db_session.scalars(
-        select(MattermostThreadMapping)
-        .where(MattermostThreadMapping.is_active.is_(True))
-        .order_by(MattermostThreadMapping.time_updated)
+        select(MattermostThreadMapping).order_by(MattermostThreadMapping.time_updated)
     ).all()
     for mapping in mappings:
+        if not mapping.is_active:
+            config.tombstoned_thread_root_ids.add(mapping.root_id)
+            continue
         config.owned_thread_root_ids.add(mapping.root_id)
         for dedupe_key in mapping.processed_event_ids:
             if dedupe_key not in config.processed_event_ids:

@@ -90,6 +90,9 @@ class MattermostEventNormalizer:
             if not self._is_allowed_channel(team_id, channel_id):
                 return None
 
+            if post.root_id and post.root_id in self._config.tombstoned_thread_root_ids:
+                return None
+
             if post.root_id and post.root_id in self._config.owned_thread_root_ids:
                 return self._build_channel_event(
                     MattermostNormalizedEventType.THREAD_REPLY_FOLLOWUP,

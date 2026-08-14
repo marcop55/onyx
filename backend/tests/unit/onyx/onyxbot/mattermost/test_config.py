@@ -1,10 +1,13 @@
 """Unit tests for Mattermost bot service config."""
 
+import asyncio
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 from starlette.routing import Route
 
 from onyx.onyxbot.mattermost.config import (
@@ -112,6 +115,60 @@ def test_public_bind_host_blocks_startup(public_host: str) -> None:
     with _mattermost_env({**_REQUIRED_ENV, "MATTERMOST_BOT_HOST": public_host}):
         with pytest.raises(MattermostBotConfigError, match="public address"):
             load_mattermost_bot_config_from_env()
+
+
+def test_health_becomes_unavailable_when_listener_exits() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+
+    async def stopped_runner(*args: object) -> None:
+        if len(args) > 1:
+            ready_event = args[1]
+            assert isinstance(ready_event, asyncio.Event)
+            ready_event.set()
+
+    with patch("onyx.onyxbot.mattermost.run._run_bot", stopped_runner):
+        app = get_application(config)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
+
+
+def test_startup_fails_when_listener_initialization_fails() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+
+    async def failing_runner(*_args: object) -> None:
+        raise RuntimeError("listener initialization failed")
+
+    with (
+        patch("onyx.onyxbot.mattermost.run._run_bot", failing_runner),
+        pytest.raises(RuntimeError, match="listener initialization failed"),
+    ):
+        app = get_application(config)
+        with TestClient(app):
+            pass
+
+
+def test_health_is_ready_only_while_listener_is_running() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+
+    async def running_runner(*args: object) -> None:
+        ready_event = args[1]
+        assert isinstance(ready_event, asyncio.Event)
+        ready_event.set()
+        await asyncio.Event().wait()
+
+    with patch("onyx.onyxbot.mattermost.run._run_bot", running_runner):
+        app = get_application(config)
+        with TestClient(app) as client:
+            response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 def test_mattermost_bot_service_exposes_health_route() -> None:

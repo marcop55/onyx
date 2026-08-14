@@ -69,6 +69,7 @@ class MattermostListenerConfig:
     approved_user_ids: frozenset[str] = frozenset()
     root_post_channel_ids: frozenset[str] = frozenset()
     owned_thread_root_ids: set[str] = field(default_factory=set)
+    tombstoned_thread_root_ids: set[str] = field(default_factory=set)
     owned_answer_post_root_ids: dict[str, str] = field(default_factory=dict)
     owned_answer_post_message_ids: dict[str, int] = field(default_factory=dict)
     processed_event_ids: list[str] = field(default_factory=list)
