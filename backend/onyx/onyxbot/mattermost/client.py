@@ -159,6 +159,22 @@ class MattermostClient:
         """Return the authenticated Mattermost user."""
         return await self._request_json("GET", "/api/v4/users/me")
 
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        """Return whether a user is a current member of a Mattermost channel."""
+        try:
+            payload = await self._request_json(
+                "GET",
+                f"/api/v4/channels/{channel_id}/members/{user_id}",
+            )
+        except MattermostResponseError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+        return (
+            payload.get("channel_id") == channel_id
+            and payload.get("user_id") == user_id
+        )
+
     async def connect_events(self) -> AsyncIterator[MattermostEventEnvelope]:
         """Connect to Mattermost WebSocket events and yield event envelopes."""
         session = self._require_session()

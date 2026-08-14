@@ -133,6 +133,41 @@ async def test_find_post_by_idempotency_fields_matches_stored_post() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_is_channel_member_checks_current_membership() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload={"channel_id": "channel-1", "user_id": "user-1"},
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    assert await client.is_channel_member(channel_id="channel-1", user_id="user-1")
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/channels/channel-1/members/user-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_is_channel_member_returns_false_when_user_was_removed() -> None:
+    session = _FakeSession([_FakeResponse(404, text="not found")])
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    assert not await client.is_channel_member(channel_id="channel-1", user_id="user-1")
+
+
 class _RaisingSession:
     def request(self, *args: object, **kwargs: object) -> _FakeResponse:
         _ = args, kwargs

@@ -24,6 +24,8 @@ class MattermostEventSource(Protocol):
 
     def connect_events(self) -> AsyncIterator[MattermostEventEnvelope]: ...
 
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool: ...
+
 
 class MattermostEventNormalizer:
     """Normalize Mattermost events and apply gating rules."""
@@ -74,6 +76,9 @@ class MattermostEventNormalizer:
         text = post.message
 
         if envelope.event == "posted":
+            if not self._is_allowed_channel(team_id, channel_id):
+                return None
+
             if envelope.channel_type == "D":
                 return self._build_event(
                     MattermostNormalizedEventType.DIRECT_MESSAGE,
@@ -86,9 +91,6 @@ class MattermostEventNormalizer:
                     text=text,
                     session_key=f"mattermost:dm:{team_id}:{channel_id}",
                 )
-
-            if not self._is_allowed_channel(team_id, channel_id):
-                return None
 
             if post.root_id and post.root_id in self._config.tombstoned_thread_root_ids:
                 return None
@@ -271,7 +273,10 @@ class MattermostEventNormalizer:
         )
 
     def _is_allowed_channel(self, team_id: str, channel_id: str) -> bool:
-        if channel_id not in self._config.allowed_channel_ids:
+        if (
+            self._config.allowed_channel_ids
+            and channel_id not in self._config.allowed_channel_ids
+        ):
             return False
         return (
             not self._config.allowed_team_ids
@@ -360,7 +365,9 @@ class MattermostEventListener:
             try:
                 async for envelope in self._connect_events():
                     normalized_event = self._normalizer.normalize(envelope)
-                    if normalized_event is not None:
+                    if normalized_event is not None and await self._is_authorized_event(
+                        normalized_event
+                    ):
                         yield normalized_event
                     backoff_seconds = self._config.initial_reconnect_backoff_seconds
             except asyncio.CancelledError:
@@ -378,6 +385,21 @@ class MattermostEventListener:
     ) -> NormalizedMattermostEvent | None:
         """Normalize one event. This is useful for tests and sync dispatchers."""
         return self._normalizer.normalize(envelope)
+
+    async def _is_authorized_event(self, event: NormalizedMattermostEvent) -> bool:
+        try:
+            bot_is_member = await self._client.is_channel_member(
+                channel_id=event.channel_id,
+                user_id=self._config.bot_user_id,
+            )
+            if not bot_is_member:
+                return False
+            return await self._client.is_channel_member(
+                channel_id=event.channel_id,
+                user_id=event.user_id,
+            )
+        except Exception:
+            return False
 
     async def _connect_events(self) -> AsyncIterator[MattermostEventEnvelope]:
         async for envelope in self._client.connect_events():
