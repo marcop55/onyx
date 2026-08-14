@@ -1,5 +1,7 @@
 # Mattermost adapter contract and Slack parity matrix
 
+For the v4.5.6-derived image, provenance, compatibility evidence, deployment gate, and rollback, see [Mattermost adapter release for Onyx v4.5.6](mattermost-v4.5.6-release.md).
+
 ## Scope
 
 The Mattermost adapter gives Onyx a native bot interface for the OneQode proof of concept.
