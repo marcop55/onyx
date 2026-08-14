@@ -3146,6 +3146,55 @@ class ChatSession(Base):
     persona: Mapped["Persona"] = relationship("Persona")
 
 
+class MattermostThreadMapping(Base):
+    __tablename__ = "mattermost_thread_mapping"
+    __table_args__ = (
+        UniqueConstraint(
+            "server_id",
+            "channel_id",
+            "root_id",
+            name="uq_mattermost_thread_mapping_thread",
+        ),
+        UniqueConstraint(
+            "chat_session_id",
+            name="uq_mattermost_thread_mapping_chat_session_id",
+        ),
+        Index(
+            "ix_mattermost_thread_mapping_thread_lookup",
+            "server_id",
+            "channel_id",
+            "root_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    server_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_id: Mapped[str] = mapped_column(String, nullable=False)
+    mattermost_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    persona_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persona.id", ondelete="SET NULL"), nullable=True
+    )
+    chat_session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("chat_session.id", ondelete="CASCADE")
+    )
+    parent_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    chat_session: Mapped[ChatSession] = relationship("ChatSession")
+    parent_message: Mapped["ChatMessage | None"] = relationship(
+        "ChatMessage", foreign_keys=[parent_message_id]
+    )
+    persona: Mapped["Persona | None"] = relationship("Persona")
+
+
 class ChatMessage(Base):
     """Note, the first message in a chain has no contents, it's a workaround to allow edits
     on the first message of a session, an empty root node basically
