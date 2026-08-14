@@ -21,7 +21,13 @@ from onyx.onyxbot.mattermost.models import (
     NormalizedMattermostEvent,
 )
 from onyx.onyxbot.mattermost.session import MattermostChatTarget
-from onyx.server.query_and_chat.streaming_models import CitationInfo
+from onyx.server.query_and_chat.models import MessageResponseIDInfo
+from onyx.server.query_and_chat.streaming_models import (
+    AgentResponseDelta,
+    CitationInfo,
+    Packet,
+    Placement,
+)
 
 
 @pytest.mark.asyncio
@@ -36,11 +42,21 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
     )
     client = MagicMock()
     client.create_post = AsyncMock()
+    client.create_post.return_value.id = "bot-post-1"
+    client.update_post = AsyncMock()
     config = MattermostHandlerConfig(persona_id=456)
     service_user = MagicMock()
     service_user.id = UUID("00000000-0000-0000-0000-000000000456")
-    answer = _answer(message_id=22, answer="Onyx answer")
     target = _target()
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            Packet(
+                placement=Placement(turn_index=0),
+                obj=AgentResponseDelta(content="Onyx answer"),
+            ),
+        ]
+    )
 
     with (
         patch(
@@ -54,12 +70,8 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
         patch("onyx.onyxbot.mattermost.handler.get_persona_by_id") as mock_get_persona,
         patch(
             "onyx.onyxbot.mattermost.handler.handle_stream_message_objects",
-            return_value=iter(()),
+            return_value=packets,
         ) as mock_handle_stream,
-        patch(
-            "onyx.onyxbot.mattermost.handler.gather_stream",
-            return_value=answer,
-        ),
         patch(
             "onyx.onyxbot.mattermost.handler.update_mattermost_thread_parent_message"
         ) as mock_update_parent,
@@ -95,6 +107,10 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
     client.create_post.assert_awaited_once_with(
         channel_id="channel-1",
         root_id="post-root-1",
+        message="...",
+    )
+    client.update_post.assert_awaited_once_with(
+        post_id=client.create_post.return_value.id,
         message="Onyx answer",
     )
     mock_update_parent.assert_called_once()
@@ -112,11 +128,21 @@ async def test_reply_continues_existing_parent_message() -> None:
     )
     client = MagicMock()
     client.create_post = AsyncMock()
+    client.create_post.return_value.id = "bot-post-1"
+    client.update_post = AsyncMock()
     config = MattermostHandlerConfig(persona_id=456)
     service_user = MagicMock()
     service_user.id = UUID("00000000-0000-0000-0000-000000000456")
-    answer = _answer(message_id=33, answer="Followup answer")
     target = _target()
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=33),
+            Packet(
+                placement=Placement(turn_index=0),
+                obj=AgentResponseDelta(content="Followup answer"),
+            ),
+        ]
+    )
 
     with (
         patch(
@@ -133,12 +159,8 @@ async def test_reply_continues_existing_parent_message() -> None:
         ),
         patch(
             "onyx.onyxbot.mattermost.handler.handle_stream_message_objects",
-            return_value=iter(()),
+            return_value=packets,
         ) as mock_handle_stream,
-        patch(
-            "onyx.onyxbot.mattermost.handler.gather_stream",
-            return_value=answer,
-        ),
         patch(
             "onyx.onyxbot.mattermost.handler.update_mattermost_thread_parent_message"
         ),
