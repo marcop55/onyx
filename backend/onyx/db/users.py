@@ -436,7 +436,9 @@ def get_or_create_mattermost_service_account(db_session: Session) -> User:
         return user
     except IntegrityError:
         db_session.rollback()
-        concurrent_user = get_user_by_email(MATTERMOST_SERVICE_ACCOUNT_EMAIL, db_session)
+        concurrent_user = get_user_by_email(
+            MATTERMOST_SERVICE_ACCOUNT_EMAIL, db_session
+        )
         if concurrent_user is None:
             raise
         return concurrent_user
