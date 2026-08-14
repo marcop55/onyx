@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -29,6 +29,10 @@ class MattermostStreamVisibleError(RuntimeError):
     """Raised after the Mattermost stream post shows the failure."""
 
 
+class MattermostLeaseLostError(RuntimeError):
+    """Raised before an external mutation when the durable owner fence is lost."""
+
+
 class MattermostStreamingClient(Protocol):
     async def create_post(
         self,
@@ -36,7 +40,17 @@ class MattermostStreamingClient(Protocol):
         channel_id: str,
         message: str,
         root_id: str = "",
+        pending_post_id: str | None = None,
+        props: dict[str, object] | None = None,
     ) -> MattermostPost: ...
+
+    async def find_post_by_idempotency_fields(
+        self,
+        *,
+        channel_id: str,
+        pending_post_id: str,
+        event_key: str,
+    ) -> MattermostPost | None: ...
 
     async def update_post(self, *, post_id: str, message: str) -> MattermostPost: ...
 
@@ -53,15 +67,22 @@ async def stream_mattermost_answer(
     channel_id: str,
     root_id: str,
     packets: Iterator[AnswerStreamPart],
+    post_id: str | None = None,
+    checkpoint_final: Callable[[str, int], None] | None = None,
+    before_external_update: Callable[[], bool] | None = None,
     min_update_chars: int = MATTERMOST_MIN_UPDATE_CHARS,
 ) -> MattermostStreamResult:
-    """Create one Mattermost post and update it from Onyx stream packets."""
+    """Create or resume one Mattermost post and update it from Onyx packets."""
 
-    post = await client.create_post(
-        channel_id=channel_id,
-        root_id=root_id,
-        message=MATTERMOST_STREAM_PLACEHOLDER,
-    )
+    if post_id is None:
+        _require_owner_fence(before_external_update)
+        post = await client.create_post(
+            channel_id=channel_id,
+            root_id=root_id,
+            message=MATTERMOST_STREAM_PLACEHOLDER,
+        )
+        post_id = post.id
+    assert post_id is not None
     answer = ""
     citations: list[CitationInfo] = []
     top_documents: list[SearchDoc] = []
@@ -85,19 +106,23 @@ async def stream_mattermost_answer(
             elif isinstance(packet.obj, AgentResponseDelta):
                 answer += packet.obj.content
                 if len(answer) - last_sent_answer_length >= min_update_chars:
+                    _require_owner_fence(before_external_update)
                     await _update_once(
                         client=client,
-                        post_id=post.id,
+                        post_id=post_id,
                         message=answer,
                         sent_messages=sent_messages,
                     )
                     last_sent_answer_length = len(answer)
             elif isinstance(packet.obj, CitationInfo):
                 citations.append(packet.obj)
+    except MattermostLeaseLostError as exc:
+        raise MattermostStreamVisibleError(str(exc)) from exc
     except Exception as exc:
+        _require_owner_fence(before_external_update)
         await _show_failure(
             client=client,
-            post_id=post.id,
+            post_id=post_id,
             answer=answer,
             sent_messages=sent_messages,
         )
@@ -106,7 +131,7 @@ async def stream_mattermost_answer(
     if message_id is None:
         await _show_failure(
             client=client,
-            post_id=post.id,
+            post_id=post_id,
             answer=answer,
             sent_messages=sent_messages,
         )
@@ -122,13 +147,24 @@ async def stream_mattermost_answer(
             citation_info=citations,
         )
     )
+    if checkpoint_final is not None:
+        checkpoint_final(final_message, message_id)
+    _require_owner_fence(before_external_update)
     await _update_once(
         client=client,
-        post_id=post.id,
+        post_id=post_id,
         message=final_message,
         sent_messages=sent_messages,
     )
-    return MattermostStreamResult(message_id=message_id, post_id=post.id)
+    return MattermostStreamResult(
+        message_id=message_id,
+        post_id=post_id,
+    )
+
+
+def _require_owner_fence(before_external_update: Callable[[], bool] | None) -> None:
+    if before_external_update is not None and not before_external_update():
+        raise MattermostLeaseLostError("Mattermost event lease was lost")
 
 
 async def _update_once(

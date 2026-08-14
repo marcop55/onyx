@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from onyx.cache.interface import CacheBackend
 from onyx.chat.citation_processor import CitationMapping
 from onyx.chat.models import (
+    ChatBasicResponse,
     ChatLoadedFile,
     ChatMessageSimple,
     ExtractedContextFiles,
@@ -223,3 +224,6 @@ class ChatTurnSetup:
     slack_context: SlackContext | None
     custom_tool_additional_headers: dict[str, str] | None
     mcp_headers: dict[str, str] | None
+    # Set only when a trusted transport replays an already-committed keyed turn.
+    # The provider/tool loop must not run again for this setup.
+    recovered_response: ChatBasicResponse | None = None

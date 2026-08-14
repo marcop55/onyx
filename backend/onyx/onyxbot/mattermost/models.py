@@ -31,6 +31,8 @@ class MattermostPost:
     parent_id: str = ""
     user_id: str = ""
     channel_id: str = ""
+    pending_post_id: str = ""
+    props: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

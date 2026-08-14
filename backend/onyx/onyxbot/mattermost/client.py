@@ -100,14 +100,51 @@ class MattermostClient:
         channel_id: str,
         message: str,
         root_id: str = "",
+        pending_post_id: str | None = None,
+        props: dict[str, object] | None = None,
     ) -> MattermostPost:
         """Create a Mattermost post."""
+        payload: dict[str, object] = {
+            "channel_id": channel_id,
+            "message": message,
+            "root_id": root_id,
+        }
+        if pending_post_id is not None:
+            payload["pending_post_id"] = pending_post_id
+        if props is not None:
+            payload["props"] = props
         response = await self._request_json(
             "POST",
             "/api/v4/posts",
-            json={"channel_id": channel_id, "message": message, "root_id": root_id},
+            json=payload,
         )
         return _post_from_mapping(cast(Mapping[object, object], response))
+
+    async def find_post_by_idempotency_fields(
+        self,
+        *,
+        channel_id: str,
+        pending_post_id: str,
+        event_key: str,
+    ) -> MattermostPost | None:
+        """Reconcile a possibly committed create against recent channel posts."""
+        response = await self._request_json(
+            "GET",
+            f"/api/v4/channels/{channel_id}/posts?page=0&per_page=200",
+        )
+        raw_posts = response.get("posts")
+        if not isinstance(raw_posts, dict):
+            raise MattermostClientError("Mattermost channel posts payload is invalid")
+        for raw_post in raw_posts.values():
+            if not isinstance(raw_post, Mapping):
+                continue
+            post = _post_from_mapping(cast(Mapping[object, object], raw_post))
+            if (
+                post.pending_post_id == pending_post_id
+                or post.props.get("onyx_event_key") == event_key
+            ):
+                return post
+        return None
 
     async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
         """Update a Mattermost post message."""
@@ -144,38 +181,43 @@ class MattermostClient:
     ) -> dict[str, object]:
         session = self._require_session()
         for attempt in range(self._max_rate_limit_retries + 1):
-            async with session.request(
-                method,
-                f"{self._base_url}{path}",
-                json=json,
-                headers=self._headers,
-            ) as response:
-                if response.status == 429:
-                    text = await response.text()
-                    if attempt >= self._max_rate_limit_retries:
-                        raise MattermostResponseError(text, response.status)
-                    retry_after = _retry_after_seconds(
-                        response.headers.get("Retry-After")
-                    )
-                    fallback_backoff = float(2**attempt)
-                    await self._sleep(
-                        min(
-                            retry_after
-                            if retry_after is not None
-                            else fallback_backoff,
-                            self._max_rate_limit_backoff_seconds,
+            try:
+                async with session.request(
+                    method,
+                    f"{self._base_url}{path}",
+                    json=json,
+                    headers=self._headers,
+                ) as response:
+                    if response.status == 429:
+                        text = await response.text()
+                        if attempt >= self._max_rate_limit_retries:
+                            raise MattermostResponseError(text, response.status)
+                        retry_after = _retry_after_seconds(
+                            response.headers.get("Retry-After")
                         )
-                    )
-                    continue
-                if response.status >= 400:
-                    text = await response.text()
-                    raise MattermostResponseError(text, response.status)
-                payload = await response.json()
-                if not isinstance(payload, dict):
-                    raise MattermostClientError(
-                        "Mattermost returned a non-object payload"
-                    )
-                return payload
+                        fallback_backoff = float(2**attempt)
+                        await self._sleep(
+                            min(
+                                retry_after
+                                if retry_after is not None
+                                else fallback_backoff,
+                                self._max_rate_limit_backoff_seconds,
+                            )
+                        )
+                        continue
+                    if response.status >= 400:
+                        text = await response.text()
+                        raise MattermostResponseError(text, response.status)
+                    payload = await response.json()
+                    if not isinstance(payload, dict):
+                        raise MattermostClientError(
+                            "Mattermost returned a non-object payload"
+                        )
+                    return payload
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                raise MattermostClientError(
+                    f"Mattermost {method} transport failed"
+                ) from exc
 
         raise RuntimeError("Mattermost rate-limit retry loop exhausted unexpectedly")
 
@@ -263,6 +305,8 @@ def _post_from_mapping(mapping: Mapping[object, object]) -> MattermostPost:
         parent_id=_string_value(mapping.get("parent_id")),
         user_id=_string_value(mapping.get("user_id")),
         channel_id=_string_value(mapping.get("channel_id")),
+        pending_post_id=_string_value(mapping.get("pending_post_id")),
+        props=_props_value(mapping.get("props")),
     )
 
 
@@ -288,6 +332,12 @@ def _reaction_from_payload(value: object) -> MattermostReaction | None:
         emoji_name=_string_value(mapping.get("emoji_name")),
         channel_id=_string_value(mapping.get("channel_id")),
     )
+
+
+def _props_value(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
 
 
 def _object_mapping(value: object) -> Mapping[object, object]:

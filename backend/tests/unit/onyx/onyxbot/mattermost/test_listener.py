@@ -248,7 +248,7 @@ def test_unapproved_user_posts_emit_no_event() -> None:
     assert event is None
 
 
-def test_replayed_event_ids_are_ignored() -> None:
+def test_uncompleted_replayed_event_ids_reach_durable_admission() -> None:
     normalizer = MattermostEventNormalizer(_config())
     envelope = _posted_event(
         post_id="post_root_1",
@@ -260,10 +260,11 @@ def test_replayed_event_ids_are_ignored() -> None:
     second_event = normalizer.normalize(envelope)
 
     assert first_event is not None
-    assert second_event is None
+    assert second_event is not None
+    assert second_event.dedupe_key == first_event.dedupe_key
 
 
-def test_replayed_post_event_fallback_ids_are_ignored() -> None:
+def test_uncompleted_replayed_fallback_ids_reach_durable_admission() -> None:
     normalizer = MattermostEventNormalizer(_config())
     envelope = _posted_event(post_id="post_root_1", message="@onyx what changed?")
 
@@ -271,7 +272,8 @@ def test_replayed_post_event_fallback_ids_are_ignored() -> None:
     second_event = normalizer.normalize(envelope)
 
     assert first_event is not None
-    assert second_event is None
+    assert second_event is not None
+    assert second_event.dedupe_key == first_event.dedupe_key
 
 
 def test_root_allowlisted_post_emits_normalized_event_when_enabled() -> None:
@@ -521,7 +523,8 @@ def test_reaction_feedback_fallback_dedupe_uses_answer_post_id() -> None:
     second_event = normalizer.normalize(second_envelope)
 
     assert first_event is not None
-    assert replayed_event is None
+    assert replayed_event is not None
+    assert replayed_event.dedupe_key == first_event.dedupe_key
     assert second_event is not None
 
 

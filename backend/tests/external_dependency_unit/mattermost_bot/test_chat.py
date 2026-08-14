@@ -12,7 +12,8 @@ from onyx.configs.constants import (
     QAFeedbackType,
 )
 from onyx.context.search.models import SearchDoc
-from onyx.db.models import User
+from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
+from onyx.db.models import MattermostEventState, User
 from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.onyxbot.mattermost.handler import (
     MATTERMOST_FAILURE_MESSAGE,
@@ -86,8 +87,25 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
             return_value=packets,
         ) as mock_handle_stream,
         patch(
-            "onyx.onyxbot.mattermost.handler.update_mattermost_thread_parent_message"
-        ) as mock_update_parent,
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ) as mock_complete,
     ):
         mock_get_persona.return_value = MagicMock(id=456)
 
@@ -126,13 +144,14 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
         channel_id="channel-1",
         root_id="post-root-1",
         message="...",
+        pending_post_id="pending-1",
+        props={"onyx_event_key": "1"},
     )
     client.update_post.assert_awaited_once_with(
         post_id=client.create_post.return_value.id,
         message="Onyx answer",
     )
-    mock_update_parent.assert_called_once()
-    assert mock_update_parent.call_args.kwargs["parent_message_id"] == 22
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -180,7 +199,24 @@ async def test_reply_continues_existing_parent_message() -> None:
             return_value=packets,
         ) as mock_handle_stream,
         patch(
-            "onyx.onyxbot.mattermost.handler.update_mattermost_thread_parent_message"
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
         ),
     ):
         handled = await handle_normalized_mattermost_event(
@@ -294,9 +330,22 @@ async def test_reaction_feedback_records_chat_message_feedback() -> None:
     )
     client = MagicMock()
 
-    with patch(
-        "onyx.onyxbot.mattermost.handler.create_chat_message_feedback"
-    ) as mock_feedback:
+    mapping = MagicMock(id=7)
+    claim = _processing_claim()
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_mattermost_thread_mapping",
+            return_value=mapping,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=claim,
+        ) as mock_claim,
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_feedback_event",
+            return_value=True,
+        ) as mock_complete,
+    ):
         handled = await handle_normalized_mattermost_event(
             event=event,
             config=MattermostHandlerConfig(persona_id=456),
@@ -305,15 +354,15 @@ async def test_reaction_feedback_records_chat_message_feedback() -> None:
         )
 
     assert handled is True
-    mock_feedback.assert_called_once_with(
+    mock_claim.assert_called_once()
+    mock_complete.assert_called_once_with(
+        db_session,
+        event_id=claim.event.id,
+        claim_owner=claim.claim_owner,
+        chat_message_id=22,
         is_positive=True,
         feedback_text="Mattermost feedback from user-1",
-        chat_message_id=22,
-        user_id=None,
-        db_session=db_session,
-        commit=False,
     )
-    db_session.commit.assert_called_once_with()
     db_session.rollback.assert_not_called()
 
 
@@ -335,9 +384,21 @@ async def test_reaction_feedback_rolls_back_dedupe_when_feedback_fails() -> None
         dedupe_key="reaction:event-1",
     )
 
-    with patch(
-        "onyx.onyxbot.mattermost.handler.create_chat_message_feedback",
-        side_effect=RuntimeError("feedback insert failed"),
+    mapping = MagicMock(id=7)
+    claim = _processing_claim()
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_mattermost_thread_mapping",
+            return_value=mapping,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=claim,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_feedback_event",
+            side_effect=RuntimeError("feedback insert failed"),
+        ),
     ):
         with pytest.raises(RuntimeError, match="feedback insert failed"):
             await handle_normalized_mattermost_event(
@@ -433,6 +494,23 @@ def test_session_target_uses_root_thread_and_parent_message() -> None:
     assert target.chat_session_id == UUID("00000000-0000-0000-0000-000000000321")
     assert target.parent_message_id == 77
     assert target.persona_id == 456
+
+
+def _processing_claim() -> MattermostEventClaim:
+    ledger_event = MattermostEventState(
+        id=1,
+        instance_id="default",
+        channel_id="channel-1",
+        dedupe_key="event_id:post-root-1",
+        event_type="channel_mention",
+        source_post_id="post-root-1",
+        mattermost_pending_post_id="pending-1",
+        state="pending",
+    )
+    claim_owner = UUID("00000000-0000-0000-0000-000000000999")
+    return MattermostEventClaim(
+        MattermostClaimOutcome.PROCESS, ledger_event, claim_owner
+    )
 
 
 def _event(

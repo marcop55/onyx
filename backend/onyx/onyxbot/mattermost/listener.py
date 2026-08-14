@@ -318,14 +318,11 @@ class MattermostEventNormalizer:
         )
 
     def _already_seen(self, dedupe_key: str) -> bool:
-        if dedupe_key in self._seen_event_ids:
-            self._seen_event_ids.move_to_end(dedupe_key)
-            return True
-
-        self._seen_event_ids[dedupe_key] = None
-        while len(self._seen_event_ids) > self._config.max_seen_event_ids:
-            self._seen_event_ids.popitem(last=False)
-        return False
+        """Use only hydrated, durably completed IDs as a local fast path."""
+        if dedupe_key not in self._seen_event_ids:
+            return False
+        self._seen_event_ids.move_to_end(dedupe_key)
+        return True
 
 
 def _feedback_action_from_emoji(emoji_name: str) -> QAFeedbackType | None:

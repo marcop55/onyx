@@ -1,11 +1,20 @@
-from uuid import UUID
+import datetime
+import hashlib
+from dataclasses import dataclass
+from enum import Enum
+from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from onyx.db.chat import create_chat_session, get_or_create_root_message
-from onyx.db.models import ChatSession, MattermostThreadMapping
+from onyx.db.feedback import create_chat_message_feedback
+from onyx.db.models import (
+    ChatSession,
+    MattermostEventState,
+    MattermostThreadMapping,
+)
 from onyx.onyxbot.mattermost.models import MattermostListenerConfig
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
@@ -13,6 +22,282 @@ DEFAULT_MATTERMOST_TEAM_ID = "global"
 
 class MattermostThreadTombstonedError(RuntimeError):
     """Raised when a deleted Mattermost root must not reclaim its Onyx history."""
+
+
+class MattermostClaimOutcome(str, Enum):
+    PROCESS = "process"
+    BUSY = "busy"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True)
+class MattermostEventClaim:
+    outcome: MattermostClaimOutcome
+    event: MattermostEventState
+    claim_owner: UUID | None
+
+
+def claim_durable_mattermost_event(
+    db_session: Session,
+    *,
+    instance_id: str,
+    channel_id: str,
+    dedupe_key: str,
+    event_type: str,
+    mapping_id: int | None,
+    source_post_id: str,
+    now: datetime.datetime | None = None,
+    lease_seconds: int = 300,
+) -> MattermostEventClaim:
+    if not dedupe_key:
+        raise ValueError("Mattermost events require a stable dedupe key")
+    claim_time = now or datetime.datetime.now(datetime.timezone.utc)
+    owner = uuid4()
+    lease_expires_at = claim_time + datetime.timedelta(seconds=lease_seconds)
+    event_hash = hashlib.sha256(
+        f"{instance_id}:{channel_id}:{dedupe_key}".encode()
+    ).hexdigest()
+    pending_post_id = event_hash[:26]
+    inserted_id = db_session.scalar(
+        postgresql.insert(MattermostEventState)
+        .values(
+            instance_id=instance_id,
+            channel_id=channel_id,
+            dedupe_key=dedupe_key,
+            event_type=event_type,
+            mapping_id=mapping_id,
+            source_post_id=source_post_id,
+            state="claimed",
+            claim_owner=owner,
+            lease_expires_at=lease_expires_at,
+            mattermost_pending_post_id=pending_post_id,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["instance_id", "channel_id", "dedupe_key"]
+        )
+        .returning(MattermostEventState.id)
+    )
+    if inserted_id is not None:
+        event = db_session.get(MattermostEventState, inserted_id)
+        assert event is not None
+        db_session.commit()
+        return MattermostEventClaim(MattermostClaimOutcome.PROCESS, event, owner)
+
+    event = db_session.scalar(
+        select(MattermostEventState)
+        .where(
+            MattermostEventState.instance_id == instance_id,
+            MattermostEventState.channel_id == channel_id,
+            MattermostEventState.dedupe_key == dedupe_key,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    assert event is not None
+    if event.state == "completed":
+        db_session.commit()
+        return MattermostEventClaim(MattermostClaimOutcome.COMPLETED, event, None)
+    if event.lease_expires_at is not None and event.lease_expires_at > claim_time:
+        db_session.commit()
+        return MattermostEventClaim(MattermostClaimOutcome.BUSY, event, None)
+    event.claim_owner = owner
+    event.lease_expires_at = lease_expires_at
+    db_session.commit()
+    return MattermostEventClaim(MattermostClaimOutcome.PROCESS, event, owner)
+
+
+def _checkpoint_mattermost_event(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    values: dict[str, object],
+) -> bool:
+    updated_id = db_session.scalar(
+        update(MattermostEventState)
+        .where(
+            MattermostEventState.id == event_id,
+            MattermostEventState.claim_owner == claim_owner,
+            MattermostEventState.state != "completed",
+        )
+        .values(**values)
+        .returning(MattermostEventState.id)
+    )
+    db_session.commit()
+    return updated_id is not None
+
+
+def checkpoint_mattermost_post_attempt(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+) -> bool:
+    """Persist the no-retry boundary before the first external POST."""
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"state": "post_create_attempted"},
+    )
+
+
+def checkpoint_mattermost_post(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    post_id: str,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"mattermost_post_id": post_id, "state": "post_created"},
+    )
+
+
+def checkpoint_mattermost_turn(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    user_message_id: int,
+    assistant_message_id: int,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={
+            "onyx_user_message_id": user_message_id,
+            "onyx_assistant_message_id": assistant_message_id,
+            "state": "turn_created",
+        },
+    )
+
+
+def checkpoint_mattermost_rendered_message(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    rendered_message: str,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"rendered_message": rendered_message},
+    )
+
+
+def renew_mattermost_event_lease(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    now: datetime.datetime | None = None,
+    lease_seconds: int = 300,
+) -> bool:
+    renewal_time = now or datetime.datetime.now(datetime.timezone.utc)
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={
+            "lease_expires_at": renewal_time + datetime.timedelta(seconds=lease_seconds)
+        },
+    )
+
+
+def complete_mattermost_answer_event(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+) -> bool:
+    event = db_session.scalar(
+        select(MattermostEventState)
+        .where(
+            MattermostEventState.id == event_id,
+            MattermostEventState.claim_owner == claim_owner,
+            MattermostEventState.state != "completed",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if event is None:
+        db_session.rollback()
+        return False
+    if (
+        event.mapping_id is None
+        or event.mattermost_post_id is None
+        or event.onyx_assistant_message_id is None
+        or event.rendered_message is None
+    ):
+        db_session.rollback()
+        return False
+    mapping = db_session.get(
+        MattermostThreadMapping, event.mapping_id, with_for_update=True
+    )
+    if mapping is None or not mapping.is_active:
+        db_session.rollback()
+        return False
+
+    mapping.parent_message_id = event.onyx_assistant_message_id
+    answer_post_message_ids = dict(mapping.answer_post_message_ids)
+    answer_post_message_ids[event.mattermost_post_id] = event.onyx_assistant_message_id
+    mapping.answer_post_message_ids = answer_post_message_ids
+    processed_event_ids = list(mapping.processed_event_ids)
+    if event.dedupe_key not in processed_event_ids:
+        processed_event_ids.append(event.dedupe_key)
+        mapping.processed_event_ids = processed_event_ids[-10_000:]
+    event.state = "completed"
+    event.claim_owner = None
+    event.lease_expires_at = None
+    db_session.commit()
+    return True
+
+
+def complete_mattermost_feedback_event(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    chat_message_id: int,
+    is_positive: bool,
+    feedback_text: str,
+) -> bool:
+    """Insert feedback and complete its durable event in one fenced transaction."""
+    event = db_session.scalar(
+        select(MattermostEventState)
+        .where(
+            MattermostEventState.id == event_id,
+            MattermostEventState.claim_owner == claim_owner,
+            MattermostEventState.state != "completed",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if event is None:
+        db_session.rollback()
+        return False
+    feedback = create_chat_message_feedback(
+        is_positive=is_positive,
+        feedback_text=feedback_text,
+        chat_message_id=chat_message_id,
+        user_id=None,
+        db_session=db_session,
+        commit=False,
+    )
+    db_session.flush()
+    event.feedback_id = feedback.id
+    event.state = "completed"
+    event.claim_owner = None
+    event.lease_expires_at = None
+    db_session.commit()
+    return True
 
 
 def get_mattermost_session_key(

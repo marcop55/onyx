@@ -32,6 +32,10 @@ from onyx.utils.postgres_sanitization import sanitize_string
 
 logger = setup_logger()
 
+TERMINATED_RESPONSE_PLACEHOLDER = (
+    "Response was terminated prior to completion, try regenerating."
+)
+
 
 # Note: search/streaming packet helpers moved to streaming_utils.py
 
@@ -428,6 +432,17 @@ def get_chat_message(
     return chat_message
 
 
+def get_chat_message_by_external_idempotency_key(
+    db_session: Session,
+    external_idempotency_key: str,
+) -> ChatMessage | None:
+    return db_session.scalar(
+        select(ChatMessage).where(
+            ChatMessage.external_idempotency_key == external_idempotency_key
+        )
+    )
+
+
 def get_chat_session_by_message_id(
     db_session: Session,
     message_id: int,
@@ -621,16 +636,19 @@ def reserve_message_id(
     parent_message: int,
     message_type: MessageType = MessageType.ASSISTANT,
     model_display_name: str | None = None,
+    external_idempotency_key: str | None = None,
+    commit: bool = True,
 ) -> ChatMessage:
     # Create an temporary holding chat message to the updated and saved at the end
     empty_message = ChatMessage(
         chat_session_id=chat_session_id,
         parent_message_id=parent_message,
         latest_child_message_id=None,
-        message="Response was terminated prior to completion, try regenerating.",
+        message=TERMINATED_RESPONSE_PLACEHOLDER,
         token_count=15,
         message_type=message_type,
         model_display_name=model_display_name,
+        external_idempotency_key=external_idempotency_key,
     )
 
     # Add the empty message to the session
@@ -644,9 +662,9 @@ def reserve_message_id(
     if parent_chat_message:
         parent_chat_message.latest_child_message_id = empty_message.id
 
-    # Committing because it's ok to recover this state. More clear to the user than it is now.
-    # Ideally there's a special UI for a case like this with a regenerate button but not needed for now.
-    db_session.commit()
+    # Commit by default because this placeholder is a recoverable state.
+    if commit:
+        db_session.commit()
 
     return empty_message
 
@@ -669,7 +687,7 @@ def reserve_multi_model_message_ids(
             chat_session_id=chat_session_id,
             parent_message_id=parent_message_id,
             latest_child_message_id=None,
-            message="Response was terminated prior to completion, try regenerating.",
+            message=TERMINATED_RESPONSE_PLACEHOLDER,
             token_count=15,  # placeholder; updated on completion by llm_loop_completion_handle
             message_type=MessageType.ASSISTANT,
             model_display_name=display_name,
@@ -748,6 +766,7 @@ def create_new_chat_message(
     commit: bool = True,
     reserved_message_id: int | None = None,
     reasoning_tokens: str | None = None,
+    external_idempotency_key: str | None = None,
 ) -> ChatMessage:
     if reserved_message_id is not None:
         # Edit existing message
@@ -776,6 +795,7 @@ def create_new_chat_message(
             files=files,
             error=error,
             reasoning_tokens=reasoning_tokens,
+            external_idempotency_key=external_idempotency_key,
         )
         db_session.add(new_chat_message)
 

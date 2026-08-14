@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 from onyx.onyxbot.mattermost.models import MattermostListenerConfig
 
@@ -30,6 +31,21 @@ _SECRET_ENV_VARS = frozenset({MATTERMOST_BOT_TOKEN_ENV})
 
 class MattermostBotConfigError(ValueError):
     """Raised when the Mattermost bot service is not safe to start."""
+
+
+def canonical_mattermost_instance_id(url: str) -> str:
+    """Return a stable installation scope without credentials or query data."""
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if not scheme or not hostname:
+        raise MattermostBotConfigError("MATTERMOST_BOT_URL must be an absolute URL")
+    port = parsed.port
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
 @dataclass(frozen=True)

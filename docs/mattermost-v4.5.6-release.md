@@ -32,9 +32,17 @@ d0df094c00  feat: stream Mattermost answers with citations
 4c6a3a8f8b  style: format Mattermost streaming files
 ```
 
-The release branch changes the adapter migration parent from edge-only revision `3350a25df58e` to v4.5.6 head `f57f35403f6c`. No other release migration is added.
+The release branch changes the initial adapter migration parent from edge-only revision `3350a25df58e` to v4.5.6 head `f57f35403f6c`, then applies the additive release chain:
 
-## Candidate image
+```text
+f57f35403f6c -> a14eb2f1d9c0 -> b72c9e4f1a2d -> c83d1e7a4b6f
+```
+
+`uv run alembic heads` must report exactly one head, `c83d1e7a4b6f`. Before review and again from the final image, prove disposable upgrade from `f57f35403f6c` through the full chain, downgrade all the way to `f57f35403f6c`, and re-upgrade to `c83d1e7a4b6f`.
+
+## Superseded candidate image (do not deploy)
+
+The values below document an earlier build only. They are not approved deployment inputs. Rebuild after exact-head independent approval and merge, then replace this section with the actual reviewed source commit, immutable local image ID, and labels.
 
 | Item | Value |
 | --- | --- |
@@ -66,6 +74,15 @@ docker buildx build \
 The tag is deterministic for this reviewed source. The local image ID is the immutable deployment reference on this host. Push to an approved private registry before multi-host use, then record the registry digest. The Dockerfile pins base images and Python requirement hashes. Debian package repositories are not snapshot-pinned, so this is not a bit-for-bit reproducible build claim.
 
 ## Compatibility evidence
+
+Current working-tree evidence:
+
+- `uv run pytest -q backend/tests/unit/onyx/onyxbot/mattermost`: 67 passed, 1 warning.
+- `uv run alembic heads` from `backend/`: exactly one head, `c83d1e7a4b6f`.
+- Disposable PostgreSQL 15.2 full-chain test passed: upgraded through `f57f35403f6c -> a14eb2f1d9c0 -> b72c9e4f1a2d -> c83d1e7a4b6f`, preserved the legacy mapping across additive upgrades, downgraded all the way to `f57f35403f6c`, verified adapter tables and `chat_message.external_idempotency_key` were removed, and re-upgraded to `c83d1e7a4b6f`: 1 passed, 2 warnings.
+- Final-image repetition of this proof remains a release gate and must be recorded here before deployment.
+
+Superseded earlier-candidate evidence, retained only for provenance:
 
 - `uv run pytest -q backend/tests/unit/onyx/onyxbot/mattermost`: 57 passed.
 - `uv run alembic heads`: one head, `a14eb2f1d9c0`.
@@ -119,14 +136,13 @@ The live project `orka-issue2-persist-c174d899` must not change during release q
 
 ## Rollback
 
-Rollback does not recreate or delete any volume.
+Rollback does not recreate or delete any volume. The standard v4.5.6 backend must never start while PostgreSQL remains stamped at an adapter-only revision.
 
-1. Stop only the new `mattermost_bot` service.
-2. Set all backend roles to the prior immutable image:
-   `sha256:53704e5ffa0272cdf93d0644cb37842ec7b1282a4f56524b8de468d39b74e139`.
-3. Recreate only `api_server` and `background` from that image.
-4. Run `alembic downgrade f57f35403f6c` only if rollback requires removal of the adapter table and the backup is verified. The standard v4.5.6 backend can operate while the additive table remains.
-5. Verify API health, direct web-to-API calls, browser signup/login, indexing, search, and restart counts.
-6. Rotate a Mattermost token only when a live token had reached the candidate adapter.
+1. Require a verified backup and successful disposable restore rehearsal.
+2. Stop `mattermost_bot`, `api_server`, and `background` to quiesce writers.
+3. While the reviewed custom image is still selected, run `alembic downgrade f57f35403f6c` through the complete reverse chain and verify the current revision is exactly `f57f35403f6c`.
+4. Only then set `api_server` and `background` to the prior immutable image `sha256:53704e5ffa0272cdf93d0644cb37842ec7b1282a4f56524b8de468d39b74e139` and recreate only those stateless services.
+5. Verify API health, direct web-to-API calls, browser signup/login, indexing, search, retained volume identity, and stable restart counts.
+6. Preserve the custom image and migration evidence for forward recovery. Rotate a Mattermost token only when a live token had reached an untrusted runtime.
 
 Keep the production bot account, token, and live Mattermost tests outside this release issue. Live disposable-bot evidence remains required by `marcop55/onyx#8`.

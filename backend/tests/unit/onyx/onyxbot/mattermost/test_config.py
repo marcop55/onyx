@@ -19,6 +19,7 @@ from onyx.onyxbot.mattermost.config import (
     MATTERMOST_BOT_URL_ENV,
     MATTERMOST_BOT_USER_ID_ENV,
     MattermostBotConfigError,
+    canonical_mattermost_instance_id,
     load_mattermost_bot_config_from_env,
     redacted_mattermost_bot_env,
 )
@@ -31,6 +32,16 @@ _REQUIRED_ENV = {
     MATTERMOST_BOT_USER_ID_ENV: "bot_user_1",
     MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV: "channel_1, channel_2",
 }
+
+
+def test_canonical_instance_id_is_stable_and_installation_specific() -> None:
+    assert (
+        canonical_mattermost_instance_id("HTTPS://Mattermost.Example.Test:443/base/")
+        == "https://mattermost.example.test/base"
+    )
+    assert canonical_mattermost_instance_id(
+        "https://other.example.test/base"
+    ) != canonical_mattermost_instance_id("https://mattermost.example.test/base")
 
 
 @contextmanager

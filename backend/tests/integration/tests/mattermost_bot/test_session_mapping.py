@@ -1,22 +1,37 @@
+import datetime
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 from time import sleep
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import delete, inspect, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from onyx.configs.constants import MessageType
-from onyx.db.chat import create_new_chat_message
+from onyx.db.chat import (
+    create_new_chat_message,
+    get_chat_message_by_external_idempotency_key,
+    reserve_message_id,
+)
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
+from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.mattermost_bot import (
+    MattermostClaimOutcome,
     MattermostThreadTombstonedError,
+    checkpoint_mattermost_post,
+    checkpoint_mattermost_rendered_message,
+    checkpoint_mattermost_turn,
+    claim_durable_mattermost_event,
     claim_mattermost_event,
+    complete_mattermost_answer_event,
+    complete_mattermost_feedback_event,
     get_mattermost_chat_session_for_thread,
     get_mattermost_session_key,
     get_mattermost_thread_mapping,
@@ -27,7 +42,14 @@ from onyx.db.mattermost_bot import (
     tombstone_mattermost_thread_mapping,
     update_mattermost_thread_parent_message,
 )
-from onyx.db.models import ChatMessage, ChatSession, MattermostThreadMapping, Persona
+from onyx.db.models import (
+    ChatMessage,
+    ChatMessageFeedback,
+    ChatSession,
+    MattermostEventState,
+    MattermostThreadMapping,
+    Persona,
+)
 from onyx.onyxbot.mattermost.listener import MattermostEventListener
 from onyx.onyxbot.mattermost.models import (
     MattermostEventEnvelope,
@@ -474,6 +496,115 @@ def test_root_deletion_tombstone_preserves_history_and_is_not_rehydrated(
     assert mentioned_reply is None
 
 
+def test_durable_event_claim_serializes_and_allows_expired_lease_takeover(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    mapping = get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-ledger-team",
+        channel_id="mattermost-test-ledger-channel",
+        root_id="mattermost-test-ledger-root",
+        mattermost_user_id="mattermost-user",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+    claim_time = datetime.datetime(2026, 8, 14, tzinfo=datetime.timezone.utc)
+    barrier = Barrier(2)
+
+    def worker() -> tuple[MattermostClaimOutcome, UUID | None]:
+        token = CURRENT_TENANT_ID_CONTEXTVAR.set("public")
+        try:
+            with get_session_with_current_tenant() as session:
+                barrier.wait()
+                claim = claim_durable_mattermost_event(
+                    session,
+                    instance_id="mattermost-test-instance",
+                    channel_id=mapping.channel_id,
+                    dedupe_key="event_id:ledger-concurrent",
+                    event_type="channel_mention",
+                    mapping_id=mapping.id,
+                    source_post_id="mattermost-test-ledger-root",
+                    now=claim_time,
+                    lease_seconds=300,
+                )
+                return claim.outcome, claim.claim_owner
+        finally:
+            CURRENT_TENANT_ID_CONTEXTVAR.reset(token)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: worker(), range(2)))
+
+    assert sorted(outcome.value for outcome, _owner in outcomes) == ["busy", "process"]
+    first_owner = next(
+        owner
+        for outcome, owner in outcomes
+        if outcome is MattermostClaimOutcome.PROCESS
+    )
+    assert first_owner is not None
+
+    takeover = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id=mapping.channel_id,
+        dedupe_key="event_id:ledger-concurrent",
+        event_type="channel_mention",
+        mapping_id=mapping.id,
+        source_post_id="mattermost-test-ledger-root",
+        now=claim_time + datetime.timedelta(seconds=301),
+        lease_seconds=300,
+    )
+    assert takeover.outcome is MattermostClaimOutcome.PROCESS
+    assert takeover.claim_owner is not None
+    assert takeover.claim_owner != first_owner
+    assert mapping.parent_message_id is not None
+
+    assert not checkpoint_mattermost_post(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=first_owner,
+        post_id="stale-post",
+    )
+    assert checkpoint_mattermost_post(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=takeover.claim_owner,
+        post_id="mattermost-test-answer",
+    )
+    assert checkpoint_mattermost_turn(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=takeover.claim_owner,
+        user_message_id=mapping.parent_message_id,
+        assistant_message_id=mapping.parent_message_id,
+    )
+    assert checkpoint_mattermost_rendered_message(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=takeover.claim_owner,
+        rendered_message="final answer",
+    )
+    assert complete_mattermost_answer_event(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=takeover.claim_owner,
+    )
+    db_session.refresh(mapping)
+    db_session.refresh(takeover.event)
+    assert mapping.parent_message_id == takeover.event.onyx_assistant_message_id
+    assert mapping.answer_post_message_ids == {
+        "mattermost-test-answer": takeover.event.onyx_assistant_message_id
+    }
+    assert takeover.event.state == "completed"
+    assert takeover.event.claim_owner is None
+    assert not checkpoint_mattermost_rendered_message(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=takeover.claim_owner,
+        rendered_message="stale overwrite",
+    )
+
+
 def test_concurrent_event_claim_has_exactly_one_winner(
     db_session: Session,
     test_persona: Persona,
@@ -523,6 +654,284 @@ def test_concurrent_event_claim_has_exactly_one_winner(
     assert mapping is not None
     assert sorted(outcomes) == [False, True]
     assert mapping.processed_event_ids.count("event_id:concurrent-event") == 1
+
+
+def test_durable_feedback_is_atomic_and_replay_safe(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    mapping = get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-feedback-team",
+        channel_id="mattermost-test-feedback-channel",
+        root_id="mattermost-test-feedback-root",
+        mattermost_user_id="mattermost-user",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+    assert mapping.parent_message_id is not None
+    parent = db_session.get(ChatMessage, mapping.parent_message_id)
+    assert parent is not None
+    assistant = create_new_chat_message(
+        chat_session_id=mapping.chat_session_id,
+        parent_message=parent,
+        message="answer",
+        token_count=1,
+        message_type=MessageType.ASSISTANT,
+        db_session=db_session,
+    )
+    claim = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id=mapping.channel_id,
+        dedupe_key="reaction:event-feedback",
+        event_type="reaction_feedback",
+        mapping_id=mapping.id,
+        source_post_id="mattermost-test-answer",
+    )
+    assert claim.outcome is MattermostClaimOutcome.PROCESS
+    assert claim.claim_owner is not None
+
+    # Simulate process failure after the feedback INSERT is flushed but before the
+    # event completion transaction commits. PostgreSQL rollback must remove both.
+    feedback = create_chat_message_feedback(
+        is_positive=True,
+        feedback_text="Mattermost feedback from user-1",
+        chat_message_id=assistant.id,
+        user_id=None,
+        db_session=db_session,
+        commit=False,
+    )
+    db_session.flush()
+    claim.event.feedback_id = feedback.id
+    claim.event.state = "completed"
+    db_session.rollback()
+    assert (
+        db_session.scalar(
+            select(ChatMessageFeedback).where(
+                ChatMessageFeedback.chat_message_id == assistant.id
+            )
+        )
+        is None
+    )
+    db_session.expire_all()
+    rolled_back_event = db_session.get(MattermostEventState, claim.event.id)
+    assert rolled_back_event is not None
+    assert rolled_back_event.state == "claimed"
+    assert rolled_back_event.feedback_id is None
+
+    takeover = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id=mapping.channel_id,
+        dedupe_key="reaction:event-feedback",
+        event_type="reaction_feedback",
+        mapping_id=mapping.id,
+        source_post_id="mattermost-test-answer",
+        now=datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(seconds=301),
+    )
+    assert takeover.outcome is MattermostClaimOutcome.PROCESS
+    assert takeover.claim_owner is not None
+    assert complete_mattermost_feedback_event(
+        db_session,
+        event_id=takeover.event.id,
+        claim_owner=takeover.claim_owner,
+        chat_message_id=assistant.id,
+        is_positive=True,
+        feedback_text="Mattermost feedback from user-1",
+    )
+
+    replay = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id=mapping.channel_id,
+        dedupe_key="reaction:event-feedback",
+        event_type="reaction_feedback",
+        mapping_id=mapping.id,
+        source_post_id="mattermost-test-answer",
+    )
+    assert replay.outcome is MattermostClaimOutcome.COMPLETED
+    event = db_session.get(MattermostEventState, claim.event.id)
+    assert event is not None
+    assert event.state == "completed"
+    assert event.feedback_id is not None
+    feedback_rows = list(
+        db_session.scalars(
+            select(ChatMessageFeedback).where(
+                ChatMessageFeedback.chat_message_id == assistant.id
+            )
+        )
+    )
+    assert len(feedback_rows) == 1
+    assert feedback_rows[0].id == event.feedback_id
+
+
+def test_concurrent_feedback_admission_creates_exactly_one_row(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    mapping = get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-feedback-race-team",
+        channel_id="mattermost-test-feedback-race-channel",
+        root_id="mattermost-test-feedback-race-root",
+        mattermost_user_id="mattermost-user",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+    assert mapping.parent_message_id is not None
+    parent = db_session.get(ChatMessage, mapping.parent_message_id)
+    assert parent is not None
+    assistant = create_new_chat_message(
+        chat_session_id=mapping.chat_session_id,
+        parent_message=parent,
+        message="answer",
+        token_count=1,
+        message_type=MessageType.ASSISTANT,
+        db_session=db_session,
+    )
+    mapping_id = mapping.id
+    channel_id = mapping.channel_id
+    assistant_id = assistant.id
+    barrier = Barrier(2)
+
+    def claim_and_record() -> bool:
+        token = CURRENT_TENANT_ID_CONTEXTVAR.set("public")
+        try:
+            with get_session_with_current_tenant() as session:
+                barrier.wait()
+                claim = claim_durable_mattermost_event(
+                    session,
+                    instance_id="mattermost-test-instance",
+                    channel_id=channel_id,
+                    dedupe_key="reaction:event-feedback-race",
+                    event_type="reaction_feedback",
+                    mapping_id=mapping_id,
+                    source_post_id="mattermost-test-answer-race",
+                )
+                if (
+                    claim.outcome is not MattermostClaimOutcome.PROCESS
+                    or claim.claim_owner is None
+                ):
+                    return False
+                return complete_mattermost_feedback_event(
+                    session,
+                    event_id=claim.event.id,
+                    claim_owner=claim.claim_owner,
+                    chat_message_id=assistant_id,
+                    is_positive=True,
+                    feedback_text="Mattermost feedback from user-1",
+                )
+        finally:
+            CURRENT_TENANT_ID_CONTEXTVAR.reset(token)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: claim_and_record(), range(2)))
+
+    db_session.expire_all()
+    feedback_rows = list(
+        db_session.scalars(
+            select(ChatMessageFeedback).where(
+                ChatMessageFeedback.chat_message_id == assistant_id
+            )
+        )
+    )
+    event = db_session.scalar(
+        select(MattermostEventState).where(
+            MattermostEventState.dedupe_key == "reaction:event-feedback-race"
+        )
+    )
+    assert sorted(outcomes) == [False, True]
+    assert len(feedback_rows) == 1
+    assert event is not None
+    assert event.state == "completed"
+    assert event.feedback_id == feedback_rows[0].id
+
+
+def test_concurrent_keyed_turn_create_or_load_has_one_pair(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    mapping = get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-turn-race-team",
+        channel_id="mattermost-test-turn-race-channel",
+        root_id="mattermost-test-turn-race-root",
+        mattermost_user_id="mattermost-user",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+    assert mapping.parent_message_id is not None
+    chat_session_id = mapping.chat_session_id
+    parent_message_id = mapping.parent_message_id
+    barrier = Barrier(2)
+    user_key = "mattermost:event:turn-race:user"
+    assistant_key = "mattermost:event:turn-race:assistant"
+
+    def create_or_load() -> tuple[bool, int, int]:
+        token = CURRENT_TENANT_ID_CONTEXTVAR.set("public")
+        try:
+            with get_session_with_current_tenant() as session:
+                parent = session.get(ChatMessage, parent_message_id)
+                assert parent is not None
+                barrier.wait()
+                try:
+                    user_message = create_new_chat_message(
+                        chat_session_id=chat_session_id,
+                        parent_message=parent,
+                        message="question",
+                        token_count=1,
+                        message_type=MessageType.USER,
+                        db_session=session,
+                        commit=False,
+                        external_idempotency_key=user_key,
+                    )
+                    assistant_message = reserve_message_id(
+                        db_session=session,
+                        chat_session_id=chat_session_id,
+                        parent_message=user_message.id,
+                        message_type=MessageType.ASSISTANT,
+                        external_idempotency_key=assistant_key,
+                        commit=False,
+                    )
+                    session.commit()
+                    return True, user_message.id, assistant_message.id
+                except IntegrityError:
+                    session.rollback()
+                    user_message = get_chat_message_by_external_idempotency_key(
+                        db_session=session,
+                        external_idempotency_key=user_key,
+                    )
+                    assistant_message = get_chat_message_by_external_idempotency_key(
+                        db_session=session,
+                        external_idempotency_key=assistant_key,
+                    )
+                    assert user_message is not None
+                    assert assistant_message is not None
+                    return False, user_message.id, assistant_message.id
+        finally:
+            CURRENT_TENANT_ID_CONTEXTVAR.reset(token)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: create_or_load(), range(2)))
+
+    assert sorted(created for created, _, _ in outcomes) == [False, True]
+    assert len({(user_id, assistant_id) for _, user_id, assistant_id in outcomes}) == 1
+    assert (
+        db_session.scalar(
+            select(ChatMessage).where(ChatMessage.external_idempotency_key == user_key)
+        )
+        is not None
+    )
+    assert (
+        db_session.scalar(
+            select(ChatMessage).where(
+                ChatMessage.external_idempotency_key == assistant_key
+            )
+        )
+        is not None
+    )
 
 
 def test_model_matches_migration_shape(db_session: Session) -> None:
@@ -582,6 +991,7 @@ def test_migration_upgrade_from_legacy_mapping_and_downgrade(
         onyx_user_id=None,
     )
     mapping_id = mapping.id
+    chat_session_id = mapping.chat_session_id
     db_session.expunge_all()
 
     _run_alembic("a14eb2f1d9c0", downgrade=True)
@@ -636,5 +1046,43 @@ def test_migration_upgrade_from_legacy_mapping_and_downgrade(
         assert restored_state.answer_post_message_ids == {}
         assert restored_state.processed_event_ids == []
         assert restored_state.is_active is True
+        upgraded_tables = set(inspect(upgraded_session.bind).get_table_names())
+        assert "mattermost_event_state" in upgraded_tables
+        chat_message_columns = {
+            column["name"]
+            for column in inspect(upgraded_session.bind).get_columns("chat_message")
+        }
+        assert "external_idempotency_key" in chat_message_columns
 
+    _run_alembic("f57f35403f6c", downgrade=True)
+    with get_session_with_current_tenant() as release_session:
+        if release_session.bind is None:
+            raise RuntimeError("Database session is not bound")
+        release_inspector = inspect(release_session.bind)
+        release_tables = set(release_inspector.get_table_names())
+        assert "mattermost_thread_mapping" not in release_tables
+        assert "mattermost_event_state" not in release_tables
+        release_chat_columns = {
+            column["name"] for column in release_inspector.get_columns("chat_message")
+        }
+        assert "external_idempotency_key" not in release_chat_columns
+
+    _run_alembic("head")
+    with get_session_with_current_tenant() as reupgraded_session:
+        if reupgraded_session.bind is None:
+            raise RuntimeError("Database session is not bound")
+        reupgraded_inspector = inspect(reupgraded_session.bind)
+        assert {
+            "mattermost_thread_mapping",
+            "mattermost_event_state",
+        }.issubset(reupgraded_inspector.get_table_names())
+        reupgraded_chat_columns = {
+            column["name"]
+            for column in reupgraded_inspector.get_columns("chat_message")
+        }
+        assert "external_idempotency_key" in reupgraded_chat_columns
+
+    db_session.rollback()
+    db_session.execute(delete(ChatSession).where(ChatSession.id == chat_session_id))
+    db_session.commit()
     _cleanup_mattermost_rows(db_session)

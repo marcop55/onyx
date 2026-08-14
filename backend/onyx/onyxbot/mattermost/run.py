@@ -15,6 +15,7 @@ from onyx.db.mattermost_bot import hydrate_mattermost_listener_config
 from onyx.onyxbot.mattermost.client import MattermostClient
 from onyx.onyxbot.mattermost.config import (
     MattermostBotConfig,
+    canonical_mattermost_instance_id,
     load_mattermost_bot_config_from_env,
     redacted_mattermost_bot_env,
 )
@@ -81,6 +82,7 @@ async def _run_bot(
 
     handler_config = MattermostHandlerConfig(
         persona_id=config.persona_id,
+        instance_id=canonical_mattermost_instance_id(config.url),
         owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
         tombstoned_thread_root_ids=(config.listener_config.tombstoned_thread_root_ids),
         owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,

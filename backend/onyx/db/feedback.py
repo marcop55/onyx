@@ -224,7 +224,7 @@ def create_chat_message_feedback(
     predefined_feedback: str | None = None,  # Added predefined_feedback parameter
     *,
     commit: bool = True,
-) -> None:
+) -> ChatMessageFeedback:
     if (
         is_positive is None
         and feedback_text is None
@@ -251,6 +251,7 @@ def create_chat_message_feedback(
     db_session.add(message_feedback)
     if commit:
         db_session.commit()
+    return message_feedback
 
 
 def remove_chat_message_feedback(
