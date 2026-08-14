@@ -143,6 +143,7 @@ async def test_handle_normalized_event_streams_and_records_parent_message() -> N
         root_post_id="root-post-1",
         user_id="user-1",
         text="what changed?",
+        dedupe_key="event_id:root-post-1",
     )
     packets = iter(
         [
@@ -224,6 +225,7 @@ async def test_handle_normalized_event_does_not_duplicate_visible_stream_failure
         root_post_id="root-post-1",
         user_id="user-1",
         text="what changed?",
+        dedupe_key="event_id:root-post-1",
     )
     packets = iter(
         [

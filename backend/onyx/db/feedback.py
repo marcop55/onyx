@@ -222,6 +222,8 @@ def create_chat_message_feedback(
     # Slack user requested help from human
     required_followup: bool | None = None,
     predefined_feedback: str | None = None,  # Added predefined_feedback parameter
+    *,
+    commit: bool = True,
 ) -> None:
     if (
         is_positive is None
@@ -247,7 +249,8 @@ def create_chat_message_feedback(
     )
 
     db_session.add(message_feedback)
-    db_session.commit()
+    if commit:
+        db_session.commit()
 
 
 def remove_chat_message_feedback(

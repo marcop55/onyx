@@ -44,9 +44,10 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
             {listener_task, readiness_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if listener_task in done and not listener_ready.is_set():
+        if listener_task in done:
             readiness_task.cancel()
             await listener_task
+            raise RuntimeError("Mattermost listener exited before becoming ready")
         if not readiness_task.done():
             readiness_task.cancel()
         try:

@@ -1,5 +1,8 @@
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
+from time import sleep
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +16,7 @@ from onyx.db.chat import create_new_chat_message
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import (
     MattermostThreadTombstonedError,
+    claim_mattermost_event,
     get_mattermost_chat_session_for_thread,
     get_mattermost_session_key,
     get_mattermost_thread_mapping,
@@ -468,6 +472,57 @@ def test_root_deletion_tombstone_preserves_history_and_is_not_rehydrated(
     assert "root-delete" not in restarted_config.owned_thread_root_ids
     assert reply is None
     assert mentioned_reply is None
+
+
+def test_concurrent_event_claim_has_exactly_one_winner(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-concurrent-team",
+        channel_id="mattermost-test-concurrent-channel",
+        root_id="mattermost-test-concurrent-root",
+        mattermost_user_id="mattermost-user",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+    barrier = Barrier(2)
+
+    def claim() -> bool:
+        token = CURRENT_TENANT_ID_CONTEXTVAR.set("public")
+        try:
+            with get_session_with_current_tenant() as session:
+                barrier.wait()
+                mapping = claim_mattermost_event(
+                    db_session=session,
+                    server_id="mattermost-test-concurrent-team",
+                    channel_id="mattermost-test-concurrent-channel",
+                    root_id="mattermost-test-concurrent-root",
+                    dedupe_key="event_id:concurrent-event",
+                )
+                if mapping is None:
+                    session.rollback()
+                    return False
+                sleep(0.05)
+                session.commit()
+                return True
+        finally:
+            CURRENT_TENANT_ID_CONTEXTVAR.reset(token)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: claim(), range(2)))
+
+    db_session.expire_all()
+    mapping = get_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-concurrent-team",
+        channel_id="mattermost-test-concurrent-channel",
+        root_id="mattermost-test-concurrent-root",
+    )
+    assert mapping is not None
+    assert sorted(outcomes) == [False, True]
+    assert mapping.processed_event_ids.count("event_id:concurrent-event") == 1
 
 
 def test_model_matches_migration_shape(db_session: Session) -> None:

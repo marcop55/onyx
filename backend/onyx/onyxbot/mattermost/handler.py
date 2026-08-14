@@ -16,7 +16,7 @@ from onyx.db.chat import get_chat_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.mattermost_bot import (
     MattermostThreadTombstonedError,
-    get_mattermost_thread_mapping,
+    claim_mattermost_event,
     record_mattermost_event_state,
     tombstone_mattermost_thread_mapping,
     update_mattermost_thread_parent_message,
@@ -105,19 +105,30 @@ async def handle_normalized_mattermost_event(
         return True
 
     if event.event_type == MattermostNormalizedEventType.REACTION_FEEDBACK:
-        mapping = get_mattermost_thread_mapping(
+        mapping = claim_mattermost_event(
             db_session=db_session,
             server_id=event.team_id,
             channel_id=event.channel_id,
             root_id=event.root_post_id,
+            dedupe_key=event.dedupe_key,
         )
-        if mapping is not None:
-            record_mattermost_event_state(
+        if mapping is None:
+            db_session.rollback()
+            return False
+        try:
+            handled = _record_feedback_event(
+                event=event,
                 db_session=db_session,
-                mapping=mapping,
-                dedupe_key=event.dedupe_key,
+                commit=False,
             )
-        return _record_feedback_event(event=event, db_session=db_session)
+            if not handled:
+                db_session.rollback()
+                return False
+            db_session.commit()
+            return True
+        except Exception:
+            db_session.rollback()
+            raise
 
     if not event.text.strip():
         return False
@@ -129,11 +140,17 @@ async def handle_normalized_mattermost_event(
             persona_id=config.persona_id,
             onyx_user_id=config.onyx_user_id,
         )
-        record_mattermost_event_state(
+        claimed_mapping = claim_mattermost_event(
             db_session=db_session,
-            mapping=target.mapping,
+            server_id=event.team_id,
+            channel_id=event.channel_id,
+            root_id=target.mapping.root_id,
             dedupe_key=event.dedupe_key,
         )
+        if claimed_mapping is None:
+            db_session.rollback()
+            return False
+        db_session.commit()
         packets = _stream_mattermost_answer_packets(
             db_session=db_session,
             event=event,
@@ -188,6 +205,7 @@ def _record_feedback_event(
     *,
     event: NormalizedMattermostEvent,
     db_session: Session,
+    commit: bool = True,
 ) -> bool:
     if event.feedback_message_id is None or event.feedback_action is None:
         return False
@@ -198,6 +216,7 @@ def _record_feedback_event(
         chat_message_id=event.feedback_message_id,
         user_id=None,
         db_session=db_session,
+        commit=commit,
     )
     return True
 

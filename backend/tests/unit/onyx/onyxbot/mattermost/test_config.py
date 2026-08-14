@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -117,20 +119,45 @@ def test_public_bind_host_blocks_startup(public_host: str) -> None:
             load_mattermost_bot_config_from_env()
 
 
-def test_health_becomes_unavailable_when_listener_exits() -> None:
+def test_startup_fails_when_listener_exits_before_ready() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
+    async def stopped_runner(*_args: object) -> None:
+        return
+
+    with (
+        patch("onyx.onyxbot.mattermost.run._run_bot", stopped_runner),
+        pytest.raises(RuntimeError, match="listener exited before becoming ready"),
+    ):
+        app = get_application(config)
+        with TestClient(app):
+            pass
+
+
+def test_health_becomes_unavailable_when_listener_exits() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+    stop_listener = threading.Event()
+
     async def stopped_runner(*args: object) -> None:
-        if len(args) > 1:
-            ready_event = args[1]
-            assert isinstance(ready_event, asyncio.Event)
-            ready_event.set()
+        ready_event = args[1]
+        assert isinstance(ready_event, asyncio.Event)
+        ready_event.set()
+        while not stop_listener.is_set():
+            await asyncio.sleep(0.001)
 
     with patch("onyx.onyxbot.mattermost.run._run_bot", stopped_runner):
         app = get_application(config)
         with TestClient(app, raise_server_exceptions=False) as client:
             response = client.get("/health")
+            assert response.status_code == 200
+            stop_listener.set()
+            for _ in range(50):
+                response = client.get("/health")
+                if response.status_code == 503:
+                    break
+                time.sleep(0.002)
 
     assert response.status_code == 503
     assert response.json() == {"status": "not_ready"}

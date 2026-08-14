@@ -290,6 +290,7 @@ async def test_reaction_feedback_records_chat_message_feedback() -> None:
         feedback_answer_post_id="bot-answer-1",
         feedback_action=QAFeedbackType.LIKE,
         feedback_message_id=22,
+        dedupe_key="reaction:event-record",
     )
     client = MagicMock()
 
@@ -310,7 +311,44 @@ async def test_reaction_feedback_records_chat_message_feedback() -> None:
         chat_message_id=22,
         user_id=None,
         db_session=db_session,
+        commit=False,
     )
+    db_session.commit.assert_called_once_with()
+    db_session.rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_rolls_back_dedupe_when_feedback_fails() -> None:
+    db_session = MagicMock()
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.REACTION_FEEDBACK,
+        session_key="mattermost:channel:team-1:channel-1:post-root-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="bot-answer-1",
+        root_post_id="post-root-1",
+        user_id="user-1",
+        raw_event_type="reaction_added",
+        feedback_answer_post_id="bot-answer-1",
+        feedback_action=QAFeedbackType.LIKE,
+        feedback_message_id=22,
+        dedupe_key="reaction:event-1",
+    )
+
+    with patch(
+        "onyx.onyxbot.mattermost.handler.create_chat_message_feedback",
+        side_effect=RuntimeError("feedback insert failed"),
+    ):
+        with pytest.raises(RuntimeError, match="feedback insert failed"):
+            await handle_normalized_mattermost_event(
+                event=event,
+                config=MattermostHandlerConfig(persona_id=456),
+                client=MagicMock(),
+                db_session=db_session,
+            )
+
+    db_session.rollback.assert_called_once_with()
+    db_session.commit.assert_not_called()
 
 
 def test_format_mattermost_answer_preserves_citations() -> None:
@@ -415,6 +453,7 @@ def _event(
         user_id=user_id,
         text=text,
         raw_event_type="posted",
+        dedupe_key=f"event_id:{post_id}",
     )
 
 

@@ -28,14 +28,19 @@ def get_mattermost_thread_mapping(
     server_id: str,
     channel_id: str,
     root_id: str,
+    *,
+    for_update: bool = False,
 ) -> MattermostThreadMapping | None:
-    return db_session.scalar(
-        select(MattermostThreadMapping).where(
-            MattermostThreadMapping.server_id == server_id,
-            MattermostThreadMapping.channel_id == channel_id,
-            MattermostThreadMapping.root_id == root_id,
-        )
+    statement = select(MattermostThreadMapping).where(
+        MattermostThreadMapping.server_id == server_id,
+        MattermostThreadMapping.channel_id == channel_id,
+        MattermostThreadMapping.root_id == root_id,
     )
+    if for_update:
+        statement = statement.with_for_update().execution_options(
+            populate_existing=True
+        )
+    return db_session.scalar(statement)
 
 
 def get_mattermost_thread_mapping_by_chat_session_id(
@@ -133,6 +138,34 @@ def update_mattermost_thread_parent_message(
 ) -> MattermostThreadMapping:
     mapping.parent_message_id = parent_message_id
     db_session.commit()
+    return mapping
+
+
+def claim_mattermost_event(
+    db_session: Session,
+    server_id: str,
+    channel_id: str,
+    root_id: str,
+    dedupe_key: str,
+    *,
+    max_processed_event_ids: int = 10_000,
+) -> MattermostThreadMapping | None:
+    """Lock a thread and stage one replay key in the caller's transaction."""
+
+    mapping = get_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id=server_id,
+        channel_id=channel_id,
+        root_id=root_id,
+        for_update=True,
+    )
+    if mapping is None or not mapping.is_active:
+        return None
+    processed_event_ids = list(mapping.processed_event_ids)
+    if not dedupe_key or dedupe_key in processed_event_ids:
+        return None
+    processed_event_ids.append(dedupe_key)
+    mapping.processed_event_ids = processed_event_ids[-max_processed_event_ids:]
     return mapping
 
 
