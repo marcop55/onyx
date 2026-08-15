@@ -29,6 +29,7 @@ from onyx.db.mattermost_bot import (
     complete_mattermost_answer_event,
     complete_mattermost_control_event,
     complete_mattermost_feedback_event,
+    get_loaded_mattermost_context_post_ids,
     get_mattermost_thread_mapping,
     record_mattermost_attachment,
     renew_mattermost_event_lease,
@@ -45,6 +46,10 @@ from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import FileDescriptor
 from onyx.onyxbot.mattermost.client import MattermostClientError
+from onyx.onyxbot.mattermost.context import (
+    MattermostThreadContextFetchError,
+    build_mattermost_turn_context,
+)
 from onyx.onyxbot.mattermost.formatting import (
     format_mattermost_answer as _format_mattermost_answer,
 )
@@ -325,6 +330,15 @@ async def handle_normalized_mattermost_event(
                 claim_owner=claim_owner,
             )
 
+        thread_context = await build_mattermost_turn_context(
+            client=client,
+            event=event,
+            previously_loaded_post_ids=get_loaded_mattermost_context_post_ids(
+                db_session,
+                target.mapping.id,
+            ),
+        )
+
         ledger_event = claim.event
         if (
             ledger_event.onyx_assistant_message_id is not None
@@ -362,6 +376,11 @@ async def handle_normalized_mattermost_event(
                 db_session,
                 event_id=ledger_event.id,
                 claim_owner=claim_owner,
+                loaded_context_post_ids=(
+                    thread_context.post_ids
+                    if thread_context is not None
+                    else frozenset()
+                ),
             )
 
         post_id = ledger_event.mattermost_post_id
@@ -421,6 +440,9 @@ async def handle_normalized_mattermost_event(
                 service_user=service_user,
                 file_descriptors=file_descriptors,
                 external_idempotency_key=f"mattermost:event:{ledger_event.id}",
+                thread_context=thread_context.text
+                if thread_context is not None
+                else None,
             ),
             db_session=db_session,
             event_id=ledger_event.id,
@@ -462,6 +484,8 @@ async def handle_normalized_mattermost_event(
         return False
     except MattermostLeaseLostError:
         return False
+    except MattermostThreadContextFetchError:
+        return False
     except MattermostClientError:
         # Once a durable answer post exists, any transport outcome is ambiguous.
         # Fail closed so the same post can be reconciled/resumed on replay.
@@ -476,6 +500,9 @@ async def handle_normalized_mattermost_event(
         db_session,
         event_id=ledger_event.id,
         claim_owner=claim_owner,
+        loaded_context_post_ids=(
+            thread_context.post_ids if thread_context is not None else frozenset()
+        ),
     ):
         return False
     _record_owned_answer(
@@ -558,6 +585,7 @@ def _stream_mattermost_answer_packets(
     service_user: Any,
     file_descriptors: list[FileDescriptor],
     external_idempotency_key: str,
+    thread_context: str | None = None,
 ) -> Iterator[AnswerStreamPart]:
     if target.persona_id is None:
         raise ValueError("Mattermost thread mapping is missing persona")
@@ -589,7 +617,10 @@ def _stream_mattermost_answer_packets(
                 new_msg_req=new_message_request,
                 user=service_user,
                 bypass_acl=False,
-                additional_context=_build_mattermost_context(event),
+                additional_context=_build_mattermost_context(
+                    event,
+                    thread_context=thread_context,
+                ),
                 external_idempotency_key=external_idempotency_key,
             )
         finally:
@@ -690,14 +721,21 @@ async def _save_mattermost_attachments(
     return descriptors
 
 
-def _build_mattermost_context(event: NormalizedMattermostEvent) -> str:
-    return (
+def _build_mattermost_context(
+    event: NormalizedMattermostEvent,
+    *,
+    thread_context: str | None = None,
+) -> str:
+    base_context = (
         "The following message came from Mattermost. "
         "Use the configured Onyx persona and shared knowledge scope only.\n"
         f"Mattermost user: {event.user_id}\n"
         f"Mattermost channel: {event.channel_id}\n"
         f"Mattermost thread root: {event.root_post_id}"
     )
+    if thread_context is None:
+        return base_context
+    return base_context + "\n\n" + thread_context
 
 
 def _response_root_id(event: NormalizedMattermostEvent) -> str:
