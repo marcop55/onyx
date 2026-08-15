@@ -487,6 +487,7 @@ export interface ChannelConfig {
   respond_member_group_list?: string[];
   answer_filters?: AnswerFilterOption[];
   follow_up_tags?: string[];
+  standard_answer_category_ids?: number[];
   disabled?: boolean;
   response_style?: "default" | "orka_concise" | "detailed";
   response_type?: "citations" | "quotes";

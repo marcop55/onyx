@@ -4591,7 +4591,8 @@ class ChannelConfig(TypedDict):
     answer_filters: NotRequired[list[AllowedAnswerFilters]]
     # If None then no follow up
     # If empty list, follow up with no tags
-    follow_up_tags: NotRequired[list[str]]
+    follow_up_tags: NotRequired[list[str] | None]
+    standard_answer_category_ids: NotRequired[list[int]]
     show_continue_in_web_ui: NotRequired[bool]  # defaults to False
     disabled: NotRequired[bool]  # defaults to False
     response_style: NotRequired[str]

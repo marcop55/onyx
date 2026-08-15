@@ -34,6 +34,8 @@ interface MattermostChannelConfigFormValues {
   response_type: MattermostResponseType;
   include_source_previews: boolean;
   answer_only_when_sourced: boolean;
+  standard_answer_category_ids: string;
+  follow_up_tags: string;
   respond_tag_only: boolean;
   disabled: boolean;
 }
@@ -58,9 +60,29 @@ function valuesFromConfig(
       config?.channel_config.answer_filters?.includes(
         "well_answered_postfilter"
       ) ?? false,
+    standard_answer_category_ids:
+      config?.channel_config.standard_answer_category_ids?.join(", ") ?? "",
+    follow_up_tags: config?.channel_config.follow_up_tags?.join(", ") ?? "",
     respond_tag_only: config?.channel_config.respond_tag_only ?? true,
     disabled: config?.channel_config.disabled ?? false,
   };
+}
+
+function parseCommaSeparatedInts(value: string): number[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter(Number.isInteger);
+}
+
+function parseCommaSeparatedStrings(value: string): string[] | null {
+  const tags = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return tags.length > 0 ? tags : null;
 }
 
 export function configRequestBody(
@@ -80,6 +102,10 @@ export function configRequestBody(
     answer_filters: values.answer_only_when_sourced
       ? ["well_answered_postfilter"]
       : [],
+    standard_answer_category_ids: parseCommaSeparatedInts(
+      values.standard_answer_category_ids
+    ),
+    follow_up_tags: parseCommaSeparatedStrings(values.follow_up_tags),
     disabled: values.disabled,
     is_default: isDefault,
   });
@@ -186,6 +212,11 @@ export function MattermostChannelConfigPanel({
                   .required(),
                 include_source_previews: Yup.boolean().required(),
                 answer_only_when_sourced: Yup.boolean().required(),
+                standard_answer_category_ids: Yup.string().matches(
+                  /^$|^(\s*\d+\s*)(,\s*\d+\s*)*$/,
+                  "Use comma-separated standard answer category IDs"
+                ),
+                follow_up_tags: Yup.string(),
                 respond_tag_only: Yup.boolean().required(),
                 disabled: Yup.boolean().required(),
               })}
@@ -276,6 +307,18 @@ export function MattermostChannelConfigPanel({
                   <CheckboxField
                     name="answer_only_when_sourced"
                     label="Answer only when sources are found"
+                  />
+                  <TextFormField
+                    name="standard_answer_category_ids"
+                    label="Standard answer category IDs"
+                    type="text"
+                    subtext="Comma-separated managed Onyx standard answer category IDs for native Mattermost standard answers."
+                  />
+                  <TextFormField
+                    name="follow_up_tags"
+                    label="Follow-up tags"
+                    type="text"
+                    subtext="Optional comma-separated tags included when Mattermost users mark an answer as needing follow-up."
                   />
                   <CheckboxField
                     name="respond_tag_only"

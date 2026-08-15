@@ -19,6 +19,7 @@ from onyx.db.mattermost_bot import (
     update_mattermost_channel_config,
 )
 from onyx.db.models import ChannelConfig, User
+from onyx.db.slack_channel_config import validate_standard_answer_categories_by_ids
 from onyx.onyxbot.mattermost.client import MattermostClient, MattermostClientError
 from onyx.onyxbot.mattermost.config import canonical_mattermost_instance_id
 from onyx.onyxbot.mattermost.models import MattermostUserInfo
@@ -28,6 +29,7 @@ from onyx.server.manage.models import (
     MattermostChannelConfig,
     MattermostChannelConfigCreationRequest,
 )
+from onyx.utils.errors import EERequiredError
 
 router = APIRouter(prefix="/manage")
 
@@ -42,8 +44,24 @@ def _form_channel_config(
         "response_type": request.response_type.value,
         "include_source_previews": request.include_source_previews,
         "answer_filters": request.answer_filters,
+        "standard_answer_category_ids": request.standard_answer_category_ids,
+        "follow_up_tags": request.follow_up_tags,
         "disabled": request.disabled,
     }
+
+
+def _validate_standard_answer_category_ids(
+    *,
+    db_session: Session,
+    standard_answer_category_ids: list[int],
+) -> None:
+    try:
+        validate_standard_answer_categories_by_ids(
+            db_session=db_session,
+            standard_answer_category_ids=standard_answer_category_ids,
+        )
+    except (EERequiredError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def validate_mattermost_bot_identity(url: str, token: str) -> MattermostUserInfo:
@@ -112,6 +130,8 @@ def create_bot(
             "response_type": "citations",
             "include_source_previews": False,
             "answer_filters": [],
+            "standard_answer_category_ids": [],
+            "follow_up_tags": None,
             "disabled": False,
         },
         is_default=True,
@@ -184,6 +204,10 @@ def create_mattermost_channel_config(
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> MattermostChannelConfig:
     fetch_mattermost_bot(db_session, request.mattermost_bot_id)
+    _validate_standard_answer_category_ids(
+        db_session=db_session,
+        standard_answer_category_ids=request.standard_answer_category_ids,
+    )
     config_model = insert_mattermost_channel_config(
         db_session=db_session,
         mattermost_bot_id=request.mattermost_bot_id,
@@ -212,6 +236,10 @@ def patch_mattermost_channel_config(
     fetch_mattermost_bot(db_session, request.mattermost_bot_id)
     if existing.mattermost_bot_id != request.mattermost_bot_id:
         raise HTTPException(status_code=400, detail="Mattermost bot ID cannot change")
+    _validate_standard_answer_category_ids(
+        db_session=db_session,
+        standard_answer_category_ids=request.standard_answer_category_ids,
+    )
     config_model = update_mattermost_channel_config(
         db_session=db_session,
         mattermost_channel_config_id=mattermost_channel_config_id,

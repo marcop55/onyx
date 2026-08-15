@@ -248,6 +248,12 @@ async def _handle_interactive_action_request(
                 )
 
         with get_session_with_current_tenant() as db_session:
+            channel_config_model = fetch_mattermost_channel_config_for_bot_and_channel(
+                db_session,
+                instance_id=canonical_mattermost_instance_id(config.url),
+                bot_user_id=config.listener_config.bot_user_id,
+                channel_id=str(payload.get("channel_id") or ""),
+            )
             await handle_mattermost_interactive_action(
                 payload=payload,
                 signing_secret=config.token,
@@ -256,6 +262,11 @@ async def _handle_interactive_action_request(
                 db_session=db_session,
                 instance_id=canonical_mattermost_instance_id(config.url),
                 dispatch_mutation=dispatch_confirmed_mutation,
+                channel_config=(
+                    channel_config_model.channel_config
+                    if channel_config_model is not None
+                    else None
+                ),
                 dispatch_promotion=dispatch_confirmed_promotion,
             )
     return JSONResponse(status_code=200, content={"text": ""})

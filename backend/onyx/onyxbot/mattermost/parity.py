@@ -277,11 +277,24 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="standard_answer_workflow",
         area=SlackCapabilityArea.FEEDBACK,
         slack_capability="Slack standard-answer workflow and source feedback blocks.",
-        mattermost_contract="No direct release-line Mattermost standard-answer workflow is shipped yet.",
-        status=MattermostParityStatus.PLATFORM_GAP,
-        evidence=("backend/onyx/onyxbot/slack/handlers/handle_standard_answers.py",),
-        guarantees=frozenset({"no_fake_connectors"}),
-        fallback="Use regular Mattermost answers until issue #41 ships standard-answer parity.",
+        mattermost_contract="Managed Mattermost channel configs can bind Onyx standard-answer categories and publish matching native Mattermost thread answers before LLM generation, with current bot-and-sender membership rechecks and durable replay-safe event claims.",
+        status=MattermostParityStatus.DIRECT_MATTERMOST_FEATURE,
+        evidence=(
+            "backend/onyx/onyxbot/mattermost/standard_answers.py:handle_mattermost_standard_answer_event",
+            "backend/onyx/server/manage/mattermost_bot.py:_form_channel_config",
+            "web/src/app/admin/mattermost-bots/MattermostChannelConfigPanel.tsx:standard_answer_category_ids",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_standard_answers.py",
+            "backend/onyx/onyxbot/slack/handlers/handle_standard_answers.py",
+            *_MEMBERSHIP_EVIDENCE,
+        ),
+        guarantees=frozenset(
+            {
+                "membership_fail_closed",
+                "no_fake_connectors",
+                "replay_safe",
+                "steady_state_managed_config",
+            }
+        ),
     ),
     SlackToMattermostCapability(
         key="followup_workflow",

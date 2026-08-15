@@ -102,6 +102,8 @@ def _default_mattermost_channel_config(
     response_type: str = "citations",
     include_source_previews: bool = False,
     answer_filters: list[AllowedAnswerFilters] | None = None,
+    standard_answer_category_ids: list[int] | None = None,
+    follow_up_tags: list[str] | None = None,
     disabled: bool = False,
 ) -> ChannelConfig:
     return {
@@ -111,6 +113,8 @@ def _default_mattermost_channel_config(
         "response_type": response_type,
         "include_source_previews": include_source_previews,
         "answer_filters": answer_filters or [],
+        "standard_answer_category_ids": standard_answer_category_ids or [],
+        "follow_up_tags": follow_up_tags,
         "disabled": disabled,
     }
 
@@ -284,6 +288,21 @@ def fetch_mattermost_bot(
 
 def fetch_mattermost_bots(db_session: Session) -> list[MattermostBot]:
     return list(db_session.scalars(select(MattermostBot)).all())
+
+
+def fetch_mattermost_bot_by_instance_and_user(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> MattermostBot | None:
+    return db_session.scalar(
+        select(MattermostBot).where(
+            MattermostBot.url == instance_id,
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostBot.enabled.is_(True),
+        )
+    )
 
 
 def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> None:

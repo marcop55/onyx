@@ -11,6 +11,9 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from onyx.background.celery.tasks.mattermost_feedback import (
+    schedule_mattermost_feedback_reminder,
+)
 from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
 from onyx.configs.constants import (
@@ -98,6 +101,9 @@ from onyx.onyxbot.mattermost.placement import (
 from onyx.onyxbot.mattermost.session import (
     MattermostChatTarget,
     get_or_create_mattermost_chat_target,
+)
+from onyx.onyxbot.mattermost.standard_answers import (
+    handle_mattermost_standard_answer_event,
 )
 from onyx.onyxbot.mattermost.streaming import (
     MATTERMOST_STREAM_PLACEHOLDER,
@@ -530,6 +536,15 @@ async def handle_normalized_mattermost_event(
         )
         if channel_config and channel_config.channel_config.get("disabled"):
             return False
+        if await handle_mattermost_standard_answer_event(
+            event=event,
+            bot_user_id=config.bot_user_id,
+            client=client,
+            db_session=db_session,
+            channel_config=channel_config.channel_config if channel_config else None,
+            instance_id=config.instance_id,
+        ):
+            return True
         target = get_or_create_mattermost_chat_target(
             db_session=db_session,
             event=event,
@@ -912,6 +927,7 @@ async def handle_normalized_mattermost_event(
         )
         return True
 
+    answer_post_ids = stream_result.post_ids or (stream_result.post_id,)
     if not complete_mattermost_answer_event(
         db_session,
         event_id=ledger_event.id,
@@ -919,13 +935,22 @@ async def handle_normalized_mattermost_event(
         loaded_context_post_ids=(
             thread_context.post_ids if thread_context is not None else frozenset()
         ),
-        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
+        answer_post_ids=answer_post_ids,
     ):
         return False
+    schedule_mattermost_feedback_reminder(
+        instance_id=ledger_event.instance_id,
+        bot_user_id=config.bot_user_id or "",
+        channel_id=event.channel_id,
+        root_post_id=event.root_post_id,
+        answer_post_id=answer_post_ids[0],
+        user_id=event.user_id,
+        event_id=ledger_event.id,
+    )
     _record_owned_answers(
         config=config,
         event=event,
-        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
+        answer_post_ids=answer_post_ids,
         message_id=stream_result.message_id,
     )
     return True

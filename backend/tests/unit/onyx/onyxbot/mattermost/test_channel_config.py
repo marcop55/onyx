@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from onyx.db.mattermost_bot import (
     fetch_mattermost_channel_config_for_bot_and_channel,
@@ -16,7 +17,10 @@ from onyx.onyxbot.mattermost.models import (
     MattermostNormalizedEventType,
     NormalizedMattermostEvent,
 )
-from onyx.server.manage.mattermost_bot import _form_channel_config
+from onyx.server.manage.mattermost_bot import (
+    _form_channel_config,
+    _validate_standard_answer_category_ids,
+)
 from onyx.server.manage.models import (
     MattermostChannelConfigCreationRequest,
     MattermostResponseStyle,
@@ -125,10 +129,59 @@ def test_replay_safe_managed_config_preserves_bounded_controls_only() -> None:
         "response_type": "citations",
         "include_source_previews": False,
         "answer_filters": [],
+        "standard_answer_category_ids": [],
+        "follow_up_tags": None,
         "disabled": False,
     }
     assert "system_prompt" not in config
     assert "instructions" not in config
+
+
+def test_standard_answer_category_ids_are_validated_against_ee_lookup() -> None:
+    db_session = MagicMock()
+    categories = [SimpleNamespace(id=3), SimpleNamespace(id=5)]
+
+    with patch(
+        "onyx.db.slack_channel_config.fetch_versioned_implementation_with_fallback",
+        return_value=lambda **_kwargs: categories,
+    ) as fetch_impl:
+        _validate_standard_answer_category_ids(
+            db_session=db_session,
+            standard_answer_category_ids=[3, 5],
+        )
+
+    fetch_impl.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("resolved_categories", "message"),
+    [
+        (
+            [],
+            "Standard answers are a paid Enterprise Edition feature - enable EE or remove standard answer categories",
+        ),
+        (
+            [SimpleNamespace(id=3)],
+            "Some or all categories with ids [3, 5] do not exist",
+        ),
+    ],
+)
+def test_standard_answer_category_validation_returns_admin_errors(
+    resolved_categories: list[object],
+    message: str,
+) -> None:
+    with patch(
+        "onyx.db.slack_channel_config.fetch_versioned_implementation_with_fallback",
+        return_value=lambda **_kwargs: resolved_categories,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_standard_answer_category_ids(
+                db_session=MagicMock(),
+                standard_answer_category_ids=[3, 5],
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == message
 
 
 def test_disabled_channel_config_row_falls_back_to_enabled_default() -> None:

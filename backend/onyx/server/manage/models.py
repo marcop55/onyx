@@ -495,6 +495,8 @@ class MattermostChannelConfigCreationRequest(BaseModel):
     response_type: MattermostResponseType = MattermostResponseType.CITATIONS
     include_source_previews: bool = False
     answer_filters: list[AllowedAnswerFilters] = Field(default_factory=list)
+    standard_answer_category_ids: list[int] = Field(default_factory=list)
+    follow_up_tags: list[str] | None = None
     disabled: bool = False
     is_default: bool = False
     is_ephemeral: bool = False
