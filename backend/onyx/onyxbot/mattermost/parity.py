@@ -458,14 +458,23 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="health_delivery_observability",
         area=SlackCapabilityArea.ADMINISTRATION,
         slack_capability="Slack bot delivery, retry, and health observability.",
-        mattermost_contract="Release-line Mattermost records durable event states and bounded retries, but dashboard observability is not shipped yet.",
-        status=MattermostParityStatus.PLATFORM_GAP,
+        mattermost_contract="Mattermost admin dashboard observability exposes connection health, joined-channel discovery, durable delivery/replay/rate-limit state, attachment failures, and connector indexing freshness without exposing tokens, message bodies, or file contents.",
+        status=MattermostParityStatus.DIRECT_MATTERMOST_FEATURE,
         evidence=(
+            "backend/onyx/onyxbot/mattermost/health.py:collect_mattermost_observability",
+            "backend/onyx/server/manage/mattermost_bot.py:get_bot_observability",
             "backend/onyx/db/mattermost_bot.py:MattermostEventState",
             "backend/onyx/onyxbot/mattermost/client.py:_request_json",
+            "web/src/app/admin/mattermost-bots/[bot-id]/health/page.tsx:MattermostBotHealthPage",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_observability.py",
         ),
-        guarantees=frozenset({"replay_safe"}),
-        fallback="Inspect durable event rows/logs until issue #42 ships operator health views.",
+        guarantees=frozenset(
+            {
+                "replay_safe",
+                "full_admin_panel_access_required",
+                "no_secret_observability",
+            }
+        ),
     ),
 )
 

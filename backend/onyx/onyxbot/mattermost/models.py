@@ -31,6 +31,8 @@ class MattermostResponseDeliveryMode(StrEnum):
 class MattermostDeliveryTerminalOutcome(StrEnum):
     DELIVERED = "delivered"
     DELIVERY_FAILED = "delivery_failed"
+    ATTACHMENT_FAILED = "attachment_failed"
+    RATE_LIMITED = "rate_limited"
 
 
 @dataclass(frozen=True)

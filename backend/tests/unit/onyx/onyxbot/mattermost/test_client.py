@@ -268,6 +268,46 @@ async def test_is_channel_member_returns_false_when_user_was_removed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_joined_channels_discovers_current_bot_memberships() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload=cast(
+                    dict[str, object],
+                    [
+                        {
+                            "id": "channel-1",
+                            "name": "town-square",
+                            "display_name": "Town Square",
+                        }
+                    ],
+                ),
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    channels = await client.get_joined_channels("bot-user")
+
+    assert channels == [
+        {
+            "id": "channel-1",
+            "name": "town-square",
+            "display_name": "Town Square",
+        }
+    ]
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/users/bot-user/channels",
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_channel_by_name_resolves_with_team_scope() -> None:
     session = _FakeSession(
         [

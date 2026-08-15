@@ -547,6 +547,53 @@ export type MattermostBot = {
   health_error?: string | null;
 };
 
+export interface MattermostChannelHealth {
+  id: string;
+  name: string;
+  display_name: string;
+  bot_is_member: boolean;
+}
+
+export interface MattermostDeliverySummary {
+  total_events: number;
+  completed_events: number;
+  in_progress_events: number;
+  replayable_events: number;
+  attachment_failure_events: number;
+  rate_limited_events: number;
+  latest_event_at: string | null;
+  by_event_type: Record<string, number>;
+}
+
+export interface MattermostIndexingConnectorHealth {
+  id: number;
+  name: string;
+  status: string;
+  last_successful_index_time: string | null;
+  total_docs_indexed: number;
+  in_repeated_error_state: boolean;
+}
+
+export interface MattermostIndexingSummary {
+  connectors: MattermostIndexingConnectorHealth[];
+  latest_successful_index_time: string | null;
+  total_docs_indexed: number;
+}
+
+export interface MattermostObservabilitySnapshot {
+  bot_id: number;
+  bot_name: string;
+  instance_id: string;
+  enabled: boolean;
+  bot_user_id: string;
+  bot_username: string;
+  health_status: string;
+  health_error: string | null;
+  joined_channels: MattermostChannelHealth[];
+  delivery: MattermostDeliverySummary;
+  indexing: MattermostIndexingSummary;
+}
+
 export interface MattermostChannelConfig {
   id: number;
   mattermost_bot_id: number;

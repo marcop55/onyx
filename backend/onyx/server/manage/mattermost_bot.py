@@ -22,6 +22,11 @@ from onyx.db.models import ChannelConfig, User
 from onyx.db.slack_channel_config import validate_standard_answer_categories_by_ids
 from onyx.onyxbot.mattermost.client import MattermostClient, MattermostClientError
 from onyx.onyxbot.mattermost.config import canonical_mattermost_instance_id
+from onyx.onyxbot.mattermost.health import (
+    MattermostChannelHealth,
+    MattermostObservabilitySnapshot,
+    collect_mattermost_observability,
+)
 from onyx.onyxbot.mattermost.models import MattermostUserInfo
 from onyx.server.manage.models import (
     MattermostBot,
@@ -32,6 +37,9 @@ from onyx.server.manage.models import (
 from onyx.utils.errors import EERequiredError
 
 router = APIRouter(prefix="/manage")
+_MATTERMOST_JOINED_CHANNEL_DISCOVERY_ERROR = (
+    "Mattermost joined-channel discovery failed"
+)
 
 
 def _form_channel_config(
@@ -92,6 +100,37 @@ def _validate_identity_sync(url: str, token: str) -> MattermostUserInfo:
         raise HTTPException(
             status_code=400, detail="Invalid Mattermost bot token"
         ) from exc
+
+
+async def discover_joined_mattermost_channels(
+    url: str,
+    token: str,
+    bot_user_id: str,
+) -> list[MattermostChannelHealth]:
+    async with MattermostClient(url, token) as client:
+        raw_channels = await client.get_joined_channels(bot_user_id)
+    return [
+        MattermostChannelHealth(
+            id=str(channel.get("id") or ""),
+            name=str(channel.get("name") or ""),
+            display_name=str(channel.get("display_name") or channel.get("name") or ""),
+            bot_is_member=True,
+        )
+        for channel in raw_channels
+        if channel.get("id")
+    ]
+
+
+def _discover_joined_channels_sync(bot: object) -> list[MattermostChannelHealth]:
+    token = getattr(bot, "token", None)
+    if token is None:
+        return []
+    raw_token = token.get_value(apply_mask=False)
+    return asyncio.run(
+        discover_joined_mattermost_channels(
+            getattr(bot, "url"), raw_token, getattr(bot, "bot_user_id")
+        )
+    )
 
 
 @router.post("/admin/mattermost-app/bots")
@@ -187,6 +226,26 @@ def get_bot_by_id(
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> MattermostBot:
     return MattermostBot.from_model(fetch_mattermost_bot(db_session, mattermost_bot_id))
+
+
+@router.get("/admin/mattermost-app/bots/{mattermost_bot_id}/observability")
+def get_bot_observability(
+    mattermost_bot_id: int,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> MattermostObservabilitySnapshot:
+    bot = fetch_mattermost_bot(db_session, mattermost_bot_id)
+    try:
+        joined_channels = _discover_joined_channels_sync(bot)
+    except MattermostClientError:
+        bot.health_status = "error"
+        bot.health_error = _MATTERMOST_JOINED_CHANNEL_DISCOVERY_ERROR
+        joined_channels = []
+    return collect_mattermost_observability(
+        db_session,
+        bot,
+        joined_channels=joined_channels,
+    )
 
 
 @router.get("/admin/mattermost-app/bots")

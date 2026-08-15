@@ -59,7 +59,10 @@ from onyx.onyxbot.mattermost.channel_filters import (
     MattermostChannelFilterResult,
     resolve_mattermost_channel_filters,
 )
-from onyx.onyxbot.mattermost.client import MattermostClientError
+from onyx.onyxbot.mattermost.client import (
+    MattermostClientError,
+    MattermostResponseError,
+)
 from onyx.onyxbot.mattermost.context import (
     MattermostThreadContextFetchError,
     build_mattermost_turn_context,
@@ -591,13 +594,22 @@ async def handle_normalized_mattermost_event(
             return False
 
         service_user = get_or_create_mattermost_service_account(db_session)
-        file_descriptors = await _save_mattermost_attachments(
-            client=client,
-            db_session=db_session,
-            event=event,
-            ledger_event=claim.event,
-            service_user_id=service_user.id,
-        )
+        try:
+            file_descriptors = await _save_mattermost_attachments(
+                client=client,
+                db_session=db_session,
+                event=event,
+                ledger_event=claim.event,
+                service_user_id=service_user.id,
+            )
+        except MattermostClientError as exc:
+            checkpoint_mattermost_terminal_outcome(
+                db_session,
+                event_id=ledger_event.id,
+                claim_owner=claim_owner,
+                terminal_outcome=_terminal_outcome_for_attachment_error(exc),
+            )
+            raise
         placement_context = _record_mattermost_attachment_placement_proposals(
             db_session=db_session,
             event=event,
@@ -810,6 +822,12 @@ async def handle_normalized_mattermost_event(
                         props={"onyx_event_key": str(ledger_event.id)},
                     )
                 except MattermostClientError as exc:
+                    _checkpoint_rate_limit_outcome_if_needed(
+                        db_session=db_session,
+                        ledger_event=ledger_event,
+                        claim_owner=claim_owner,
+                        exc=exc,
+                    )
                     post = await _find_reconciled_post(
                         client=client,
                         channel_id=event.channel_id,
@@ -914,7 +932,18 @@ async def handle_normalized_mattermost_event(
         return False
     except MattermostThreadContextFetchError:
         return False
-    except MattermostClientError:
+    except MattermostClientError as exc:
+        ledger_event_for_error = locals().get("ledger_event")
+        claim_owner_for_error = locals().get("claim_owner")
+        if isinstance(ledger_event_for_error, MattermostEventState) and isinstance(
+            claim_owner_for_error, UUID
+        ):
+            _checkpoint_rate_limit_outcome_if_needed(
+                db_session=db_session,
+                ledger_event=ledger_event_for_error,
+                claim_owner=claim_owner_for_error,
+                exc=exc,
+            )
         # Once a durable answer post exists, any transport outcome is ambiguous.
         # Fail closed so the same post can be reconciled/resumed on replay.
         return False
@@ -987,6 +1016,31 @@ def _resolve_delivery_mode(
     if event.channel_id in config.ephemeral_response_channel_ids:
         return MattermostResponseDeliveryMode.EPHEMERAL
     return MattermostResponseDeliveryMode.PUBLIC_THREAD
+
+
+def _terminal_outcome_for_attachment_error(
+    exc: MattermostClientError,
+) -> MattermostDeliveryTerminalOutcome:
+    if isinstance(exc, MattermostResponseError) and exc.status_code == 429:
+        return MattermostDeliveryTerminalOutcome.RATE_LIMITED
+    return MattermostDeliveryTerminalOutcome.ATTACHMENT_FAILED
+
+
+def _checkpoint_rate_limit_outcome_if_needed(
+    *,
+    db_session: Session,
+    ledger_event: MattermostEventState,
+    claim_owner: UUID,
+    exc: MattermostClientError,
+) -> None:
+    if not isinstance(exc, MattermostResponseError) or exc.status_code != 429:
+        return
+    checkpoint_mattermost_terminal_outcome(
+        db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+        terminal_outcome=MattermostDeliveryTerminalOutcome.RATE_LIMITED,
+    )
 
 
 async def _deliver_ephemeral_rendered_message(

@@ -129,7 +129,7 @@ def test_channel_config_lookup_ignores_disabled_channel_row_and_falls_back(
         mattermost_bot_id=bot.id,
         channel_id=None,
         channel_name=None,
-        persona_id=10,
+        persona_id=None,
         channel_config={
             "channel_name": None,
             "respond_tag_only": False,
@@ -144,7 +144,7 @@ def test_channel_config_lookup_ignores_disabled_channel_row_and_falls_back(
         mattermost_bot_id=bot.id,
         channel_id="channel-disabled",
         channel_name="Disabled",
-        persona_id=20,
+        persona_id=None,
         channel_config={
             "channel_name": "Disabled",
             "respond_tag_only": True,

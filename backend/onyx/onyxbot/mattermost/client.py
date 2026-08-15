@@ -227,6 +227,20 @@ class MattermostClient:
         """Return the authenticated Mattermost user."""
         return await self._request_json("GET", "/api/v4/users/me")
 
+    async def get_joined_channels(self, user_id: str) -> list[dict[str, object]]:
+        """Return channels joined by the authenticated Mattermost bot user."""
+        payload = await self._request_json_value(
+            "GET", f"/api/v4/users/{user_id}/channels"
+        )
+        if not isinstance(payload, list):
+            raise MattermostClientError("Mattermost returned a non-list payload")
+        channels: list[dict[str, object]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise MattermostClientError("Mattermost channel payload is invalid")
+            channels.append(cast(dict[str, object], item))
+        return channels
+
     async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
         """Return whether a user is a current member of a Mattermost channel."""
         try:
@@ -286,6 +300,18 @@ class MattermostClient:
         *,
         json: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        payload = await self._request_json_value(method, path, json=json)
+        if not isinstance(payload, dict):
+            raise MattermostClientError("Mattermost returned a non-object payload")
+        return cast(dict[str, object], payload)
+
+    async def _request_json_value(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, object] | None = None,
+    ) -> object:
         session = self._require_session()
         for attempt in range(self._max_rate_limit_retries + 1):
             try:
@@ -315,12 +341,7 @@ class MattermostClient:
                     if response.status >= 400:
                         text = await response.text()
                         raise MattermostResponseError(text, response.status)
-                    payload = await response.json()
-                    if not isinstance(payload, dict):
-                        raise MattermostClientError(
-                            "Mattermost returned a non-object payload"
-                        )
-                    return payload
+                    return await response.json()
             except (aiohttp.ClientError, TimeoutError) as exc:
                 raise MattermostClientError(
                     f"Mattermost {method} transport failed"
