@@ -53,6 +53,15 @@ from onyx.onyxbot.mattermost.models import (
     MattermostPost,
     NormalizedMattermostEvent,
 )
+from onyx.onyxbot.mattermost.mutations import (
+    MATTERMOST_MUTATION_PERMISSION_DENIED_MESSAGE,
+    MATTERMOST_MUTATION_REJECTED_MESSAGE,
+    MATTERMOST_MUTATION_SUCCESS_MESSAGE,
+    MATTERMOST_MUTATION_UNAVAILABLE_MESSAGE,
+    MattermostMutationAdapter,
+    MattermostMutationPermissionError,
+    parse_mattermost_mutation_command,
+)
 from onyx.onyxbot.mattermost.session import (
     MattermostChatTarget,
     get_or_create_mattermost_chat_target,
@@ -94,9 +103,48 @@ class MattermostHandlerConfig:
     owned_answer_post_root_ids: dict[str, str] | None = None
     owned_answer_post_message_ids: dict[str, int] | None = None
     instance_id: str = "mattermost"
+    mutation_adapter: MattermostMutationAdapter | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
+
+
+async def dispatch_mattermost_mutation(
+    *,
+    event: NormalizedMattermostEvent,
+    client: MattermostStreamingClient,
+    adapter: MattermostMutationAdapter | None,
+) -> bool:
+    """Consume explicit mutation commands without changing ordinary chat routing."""
+
+    try:
+        request = parse_mattermost_mutation_command(event.text)
+    except MattermostMutationPermissionError:
+        await _post_failure(
+            client=client,
+            event=event,
+            message=MATTERMOST_MUTATION_REJECTED_MESSAGE,
+        )
+        return True
+    if request is None:
+        return False
+    if adapter is None:
+        await _post_failure(
+            client=client,
+            event=event,
+            message=MATTERMOST_MUTATION_UNAVAILABLE_MESSAGE,
+        )
+        return True
+    try:
+        await adapter.route(event, request)
+    except MattermostMutationPermissionError:
+        message = MATTERMOST_MUTATION_PERMISSION_DENIED_MESSAGE
+    except Exception:
+        message = MATTERMOST_MUTATION_UNAVAILABLE_MESSAGE
+    else:
+        message = MATTERMOST_MUTATION_SUCCESS_MESSAGE
+    await _post_failure(client=client, event=event, message=message)
+    return True
 
 
 async def handle_normalized_mattermost_event(
@@ -111,6 +159,13 @@ async def handle_normalized_mattermost_event(
     Returns True when the adapter posts or records a handled event.
     Returns False for events that do not route to Onyx chat.
     """
+
+    if await dispatch_mattermost_mutation(
+        event=event,
+        client=client,
+        adapter=config.mutation_adapter,
+    ):
+        return True
 
     if event.event_type == MattermostNormalizedEventType.POST_DELETE_TOMBSTONE:
         mapping = get_mattermost_thread_mapping(

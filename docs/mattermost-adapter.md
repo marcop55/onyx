@@ -57,6 +57,25 @@ The platform gateway independently re-resolves authority and owns canonical
 Seafile preconditions, mutation, read-back verification, and immutable audit.
 Onyx exposes no direct Seafile mutation transport.
 
+Production mutation commands use the explicit wire prefix
+`!onyx-seafile-mutate ` followed by one JSON object containing exactly
+`action`, `repo_id`, `path`, `origin`, `expected_revision`, `content`,
+`destination_path`, `confirmed`, and `scope_prefix`. Types are validated exactly
+before any identity lookup. In particular, booleans are not accepted as
+revisions or strings, and unknown or missing fields fail closed.
+
+The Mattermost service enables mutation routing only when
+`MATTERMOST_MUTATION_GATEWAY_FACTORY` names an installed factory as
+`module:callable`. The factory returns the authoritative Orka platform gateway;
+the Onyx bridge imports `actions.seafile` from that installed platform package
+and constructs its exact `MattermostMutationContext`, `SeafileActionRequest`, and
+enum instances at the call boundary. The platform package/process therefore
+owns gateway assembly, Seafile transport, independent current-role resolution,
+verification, and audit. If the factory or authoritative package is unavailable,
+service startup fails closed. With the setting absent, ordinary reads and chat
+remain enabled while explicit mutation commands receive a gateway-unavailable
+denial.
+
 The parity contract is that Slack user-specific behavior maps to shared-scope Mattermost behavior
 unless this document says otherwise.
 

@@ -20,6 +20,7 @@ MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS_ENV = "MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS
 MATTERMOST_BOT_HOST_ENV = "MATTERMOST_BOT_HOST"
 MATTERMOST_BOT_PORT_ENV = "MATTERMOST_BOT_PORT"
 MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS_ENV = "MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS"
+MATTERMOST_MUTATION_GATEWAY_FACTORY_ENV = "MATTERMOST_MUTATION_GATEWAY_FACTORY"
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8091
@@ -59,6 +60,7 @@ class MattermostBotConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
     request_timeout_seconds: int = _DEFAULT_REQUEST_TIMEOUT_SECONDS
+    mutation_gateway_factory: str | None = None
 
 
 def load_mattermost_bot_config_from_env() -> MattermostBotConfig:
@@ -90,6 +92,7 @@ def load_mattermost_bot_config_from_env() -> MattermostBotConfig:
             MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS_ENV,
             _DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ),
+        mutation_gateway_factory=_env(MATTERMOST_MUTATION_GATEWAY_FACTORY_ENV),
     )
 
 
@@ -109,6 +112,7 @@ def redacted_mattermost_bot_env() -> dict[str, str]:
         MATTERMOST_BOT_HOST_ENV,
         MATTERMOST_BOT_PORT_ENV,
         MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS_ENV,
+        MATTERMOST_MUTATION_GATEWAY_FACTORY_ENV,
     ]
     redacted: dict[str, str] = {}
     for name in names:
