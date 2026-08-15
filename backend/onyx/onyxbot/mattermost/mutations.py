@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, replace
 from enum import Enum
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from onyx.onyxbot.mattermost.models import MattermostUserInfo, NormalizedMattermostEvent
 
@@ -104,6 +104,7 @@ class AuthoritativePlatformGatewayBridge:
         mutate = getattr(gateway, "mutate", None)
         if not callable(mutate):
             raise ValueError("configured platform gateway must expose mutate")
+        self._gateway = gateway
         required = (
             "MattermostMutationContext",
             "SeafileActionRequest",
@@ -160,6 +161,43 @@ class AuthoritativePlatformGatewayBridge:
             scope_prefix=request.scope_prefix,
         )
         return self._gateway_mutate(platform_context, platform_request)
+
+    def get_mattermost_attachment_placement_hierarchy(self) -> Any | None:
+        hierarchy = getattr(
+            self._gateway,
+            "get_mattermost_attachment_placement_hierarchy",
+            None,
+        )
+        if not callable(hierarchy):
+            return None
+        return hierarchy()
+
+    def read_mattermost_attachment_promotion_destination(self, proposal: object) -> Any:
+        read_back = getattr(
+            self._gateway,
+            "read_mattermost_attachment_promotion_destination",
+            None,
+        )
+        if not callable(read_back):
+            raise ValueError(
+                "configured platform gateway cannot read promotion destination"
+            )
+        return read_back(proposal)
+
+    def get_mattermost_attachment_promotion_freshness(self, proposal: object) -> str:
+        freshness = getattr(
+            self._gateway,
+            "get_mattermost_attachment_promotion_freshness",
+            None,
+        )
+        if not callable(freshness):
+            raise ValueError(
+                "configured platform gateway cannot prove promotion freshness"
+            )
+        proof = freshness(proposal)
+        if type(proof) is not str:
+            raise ValueError("promotion freshness proof must be a string")
+        return proof
 
 
 class MattermostMutationAdapter:
@@ -434,6 +472,54 @@ def parse_mattermost_mutation_command(text: str) -> SeafileActionRequest | None:
             MATTERMOST_MUTATION_REJECTED_MESSAGE
         ) from None
     return request
+
+
+def build_mattermost_confirmed_mutation_command(text: str) -> str | None:
+    """Return a confirmed mutation command for a typed unconfirmed request."""
+
+    payload = _mutation_payload_from_text(text)
+    if payload is None:
+        return None
+    if payload.get("confirmed") is not False:
+        return None
+    confirmed_payload = cast(dict[str, Any], dict(payload))
+    confirmed_payload["confirmed"] = True
+    try:
+        request = SeafileActionRequest(
+            action=SeafileActionType(confirmed_payload["action"]),
+            repo_id=confirmed_payload["repo_id"],
+            path=confirmed_payload["path"],
+            requesting_user="<unverified>",
+            origin=SeafileActionOrigin.CHAT_COMMAND,
+            expected_revision=confirmed_payload["expected_revision"],
+            content=confirmed_payload["content"],
+            destination_path=confirmed_payload["destination_path"],
+            confirmed=confirmed_payload["confirmed"],
+            scope_prefix=confirmed_payload["scope_prefix"],
+        )
+        MattermostMutationAdapter._validate_pre_authorization_contract(request)
+    except (KeyError, TypeError, ValueError, MattermostMutationPermissionError):
+        return None
+    return MATTERMOST_MUTATION_COMMAND_PREFIX + json.dumps(
+        confirmed_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _mutation_payload_from_text(text: str) -> dict[str, object] | None:
+    if type(text) is not str or not text.startswith(MATTERMOST_MUTATION_COMMAND_PREFIX):
+        return None
+    try:
+        payload = json.loads(
+            text[len(MATTERMOST_MUTATION_COMMAND_PREFIX) :],
+            object_pairs_hook=_unique_json_object,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    if type(payload) is not dict or frozenset(payload) != _REQUEST_FIELDS:
+        return None
+    return payload
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

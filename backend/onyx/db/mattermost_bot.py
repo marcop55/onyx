@@ -1,7 +1,9 @@
 import datetime
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
@@ -11,14 +13,28 @@ from sqlalchemy.orm import Session
 from onyx.db.chat import create_chat_session, get_or_create_root_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.models import (
+    AllowedAnswerFilters,
+    ChannelConfig,
     ChatSession,
     MattermostAttachment,
+    MattermostAttachmentPlacementProposal,
     MattermostBot,
+    MattermostChannelConfig,
     MattermostEventState,
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
 )
-from onyx.onyxbot.mattermost.models import MattermostListenerConfig
+from onyx.onyxbot.mattermost.models import (
+    MattermostDeliveryTerminalOutcome,
+    MattermostListenerConfig,
+    MattermostResponseDeliveryMode,
+)
+from onyx.onyxbot.mattermost.placement import (
+    MattermostAttachmentPlacementProposal as MattermostAttachmentPlacementProposalDTO,
+)
+from onyx.onyxbot.mattermost.placement import (
+    MattermostAttachmentPromotionReceipt,
+)
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
 MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
@@ -78,6 +94,186 @@ def update_mattermost_bot(
     return mattermost_bot
 
 
+def _default_mattermost_channel_config(
+    *,
+    channel_name: str | None,
+    respond_tag_only: bool = True,
+    response_style: str = "orka_concise",
+    response_type: str = "citations",
+    include_source_previews: bool = False,
+    answer_filters: list[AllowedAnswerFilters] | None = None,
+    standard_answer_category_ids: list[int] | None = None,
+    follow_up_tags: list[str] | None = None,
+    disabled: bool = False,
+) -> ChannelConfig:
+    return {
+        "channel_name": channel_name,
+        "respond_tag_only": respond_tag_only,
+        "response_style": response_style,
+        "response_type": response_type,
+        "include_source_previews": include_source_previews,
+        "answer_filters": answer_filters or [],
+        "standard_answer_category_ids": standard_answer_category_ids or [],
+        "follow_up_tags": follow_up_tags,
+        "disabled": disabled,
+    }
+
+
+def insert_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int,
+    channel_id: str | None,
+    channel_name: str | None = None,
+    persona_id: int | None = None,
+    channel_config: ChannelConfig | None = None,
+    is_default: bool = False,
+    is_ephemeral: bool = False,
+    enabled: bool = True,
+) -> MattermostChannelConfig:
+    if not is_default and not channel_id:
+        raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if is_default and channel_id is not None:
+        raise ValueError("Default Mattermost config cannot target a channel.")
+    if is_default:
+        existing_default = db_session.scalar(
+            select(MattermostChannelConfig).where(
+                MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id,
+                MattermostChannelConfig.is_default.is_(True),
+            )
+        )
+        if existing_default is not None:
+            raise ValueError("A default config already exists for this Mattermost bot.")
+    config = MattermostChannelConfig(
+        mattermost_bot_id=mattermost_bot_id,
+        channel_id=channel_id,
+        channel_name=channel_name,
+        persona_id=persona_id,
+        channel_config=channel_config
+        or _default_mattermost_channel_config(channel_name=channel_name),
+        is_default=is_default,
+        is_ephemeral=is_ephemeral,
+        enabled=enabled,
+    )
+    db_session.add(config)
+    db_session.commit()
+    return config
+
+
+def fetch_mattermost_channel_config(
+    db_session: Session,
+    mattermost_channel_config_id: int,
+) -> MattermostChannelConfig:
+    config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if config is None:
+        raise ValueError(
+            f"Unable to find Mattermost channel config with ID {mattermost_channel_config_id}"
+        )
+    return config
+
+
+def fetch_mattermost_channel_configs(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int | None = None,
+) -> list[MattermostChannelConfig]:
+    stmt = select(MattermostChannelConfig)
+    if mattermost_bot_id is not None:
+        stmt = stmt.where(
+            MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id
+        )
+    return list(db_session.scalars(stmt).all())
+
+
+def fetch_mattermost_channel_config_for_bot_and_channel(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    channel_id: str,
+) -> MattermostChannelConfig | None:
+    bot = db_session.scalar(
+        select(MattermostBot).where(
+            MattermostBot.url == instance_id,
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostBot.enabled.is_(True),
+        )
+    )
+    if bot is None:
+        return None
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.channel_id == channel_id,
+            MattermostChannelConfig.enabled.is_(True),
+        )
+    )
+    if channel_config is not None:
+        return channel_config
+    return db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.is_default.is_(True),
+            MattermostChannelConfig.enabled.is_(True),
+        )
+    )
+
+
+def update_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+    mattermost_bot_id: int | None = None,
+    channel_id: str | None,
+    channel_name: str | None = None,
+    persona_id: int | None = None,
+    channel_config: ChannelConfig | None = None,
+    is_ephemeral: bool | None = None,
+    enabled: bool | None = None,
+) -> MattermostChannelConfig:
+    config = fetch_mattermost_channel_config(
+        db_session,
+        mattermost_channel_config_id=mattermost_channel_config_id,
+    )
+    if mattermost_bot_id is not None:
+        config.mattermost_bot_id = mattermost_bot_id
+    if not config.is_default and not channel_id:
+        raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if config.is_default and channel_id is not None:
+        raise ValueError("Default Mattermost config cannot target a channel.")
+    config.channel_id = channel_id
+    config.channel_name = channel_name
+    config.persona_id = persona_id
+    if channel_config is not None:
+        config.channel_config = channel_config  # ty: ignore[invalid-assignment]
+    if is_ephemeral is not None:
+        config.is_ephemeral = is_ephemeral
+    if enabled is not None:
+        config.enabled = enabled
+    db_session.commit()
+    return config
+
+
+def remove_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+) -> None:
+    config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if config is None:
+        return
+    db_session.delete(config)
+    db_session.commit()
+
+
 def fetch_mattermost_bot(
     db_session: Session,
     mattermost_bot_id: int,
@@ -94,6 +290,21 @@ def fetch_mattermost_bots(db_session: Session) -> list[MattermostBot]:
     return list(db_session.scalars(select(MattermostBot)).all())
 
 
+def fetch_mattermost_bot_by_instance_and_user(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> MattermostBot | None:
+    return db_session.scalar(
+        select(MattermostBot).where(
+            MattermostBot.url == instance_id,
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostBot.enabled.is_(True),
+        )
+    )
+
+
 def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> None:
     mattermost_bot = db_session.scalar(
         select(MattermostBot).where(MattermostBot.id == mattermost_bot_id)
@@ -102,6 +313,45 @@ def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> Non
         return
     db_session.delete(mattermost_bot)
     db_session.commit()
+
+
+def fetch_mattermost_private_answer_channel_ids(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> frozenset[str]:
+    channel_configs = db_session.scalars(
+        select(MattermostChannelConfig)
+        .join(MattermostBot)
+        .where(
+            MattermostBot.enabled.is_(True),
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostChannelConfig.enabled.is_(True),
+            MattermostChannelConfig.is_ephemeral.is_(True),
+        )
+    ).all()
+    return frozenset(
+        channel_config.channel_id
+        for channel_config in channel_configs
+        if channel_config.channel_id is not None
+        if _canonical_mattermost_instance_id(channel_config.mattermost_bot.url)
+        == instance_id
+    )
+
+
+def _canonical_mattermost_instance_id(url: str) -> str:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if not scheme or not hostname:
+        return url.rstrip("/")
+    port = parsed.port
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
 class MattermostThreadTombstonedError(RuntimeError):
@@ -328,6 +578,139 @@ def record_mattermost_attachment(
     return attachment
 
 
+def record_mattermost_attachment_placement_proposal(
+    db_session: Session,
+    *,
+    proposal: MattermostAttachmentPlacementProposalDTO,
+) -> MattermostAttachmentPlacementProposal:
+    proposal_identity = mattermost_attachment_placement_proposal_identity(proposal)
+    duplicate_conflict_evidence = {
+        "same_name_paths": proposal.duplicate_conflict_evidence.same_name_paths,
+        "byte_identical_paths": proposal.duplicate_conflict_evidence.byte_identical_paths,
+        "same_name_revisions": proposal.duplicate_conflict_evidence.same_name_revisions,
+        "byte_identical_revisions": proposal.duplicate_conflict_evidence.byte_identical_revisions,
+    }
+    inserted_id = db_session.scalar(
+        postgresql.insert(MattermostAttachmentPlacementProposal)
+        .values(
+            attachment_id=proposal.identity.attachment_id,
+            proposal_identity=proposal_identity,
+            mattermost_file_id=proposal.identity.mattermost_file_id,
+            source_post_id=proposal.identity.source_post_id,
+            uploader_user_id=proposal.identity.uploader_user_id,
+            channel_id=proposal.identity.channel_id,
+            root_post_id=proposal.identity.root_post_id,
+            sha256=proposal.identity.sha256,
+            library_id=proposal.library_id,
+            proposed_root=proposal.proposed_root,
+            proposed_path=proposal.proposed_path,
+            normalized_filename=proposal.normalized_filename,
+            rationale=proposal.rationale,
+            confidence=proposal.confidence,
+            should_remain_temporary=proposal.should_remain_temporary,
+            hierarchy_root_revision=proposal.hierarchy_root_revision,
+            duplicate_conflict_evidence=duplicate_conflict_evidence,
+        )
+        .on_conflict_do_nothing(
+            constraint="uq_mattermost_attachment_placement_proposal_identity"
+        )
+        .returning(MattermostAttachmentPlacementProposal.id)
+    )
+    if inserted_id is None:
+        existing = db_session.scalar(
+            select(MattermostAttachmentPlacementProposal).where(
+                MattermostAttachmentPlacementProposal.proposal_identity
+                == proposal_identity
+            )
+        )
+        assert existing is not None
+        db_session.commit()
+        return existing
+    placement = db_session.get(MattermostAttachmentPlacementProposal, inserted_id)
+    assert placement is not None
+    db_session.commit()
+    return placement
+
+
+def record_mattermost_attachment_promotion_receipt(
+    db_session: Session,
+    *,
+    proposal_id: int,
+    receipt: MattermostAttachmentPromotionReceipt,
+) -> MattermostAttachmentPlacementProposal:
+    proposal = db_session.get(MattermostAttachmentPlacementProposal, proposal_id)
+    if proposal is None:
+        raise ValueError("Mattermost attachment placement proposal not found")
+    proposal.audit_evidence = receipt.audit_evidence
+    proposal.rollback_data = receipt.rollback_data
+    proposal.ingestion_freshness_proof = receipt.ingestion_freshness_proof
+    proposal.readback_file_id = receipt.readback_file_id
+    proposal.readback_revision = receipt.readback_revision
+    db_session.commit()
+    return proposal
+
+
+def claim_mattermost_attachment_placement_promotion(
+    db_session: Session,
+    *,
+    proposal_identity: str,
+    confirmer_user_id: str,
+    now: datetime.datetime | None = None,
+) -> MattermostAttachmentPlacementProposal | None:
+    """Fence one signed attachment-promotion confirmation before transport."""
+
+    if not proposal_identity or not confirmer_user_id:
+        raise ValueError("Mattermost attachment promotion identity is required")
+    claim_time = now or datetime.datetime.now(datetime.timezone.utc)
+    proposal = db_session.scalar(
+        select(MattermostAttachmentPlacementProposal)
+        .where(
+            MattermostAttachmentPlacementProposal.proposal_identity == proposal_identity
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if proposal is None:
+        db_session.commit()
+        return None
+    if (
+        proposal.promotion_claimed_at is not None
+        or proposal.readback_file_id is not None
+    ):
+        db_session.commit()
+        return None
+    proposal.promotion_confirmer_user_id = confirmer_user_id
+    proposal.promotion_claimed_at = claim_time
+    db_session.commit()
+    return proposal
+
+
+def mattermost_attachment_placement_proposal_identity(
+    proposal: MattermostAttachmentPlacementProposalDTO,
+) -> str:
+    payload = {
+        "attachment_id": proposal.identity.attachment_id,
+        "mattermost_file_id": proposal.identity.mattermost_file_id,
+        "source_post_id": proposal.identity.source_post_id,
+        "uploader_user_id": proposal.identity.uploader_user_id,
+        "channel_id": proposal.identity.channel_id,
+        "root_post_id": proposal.identity.root_post_id,
+        "sha256": proposal.identity.sha256,
+        "library_id": proposal.library_id,
+        "proposed_path": proposal.proposed_path,
+        "hierarchy_root_revision": proposal.hierarchy_root_revision,
+        "duplicate_conflict_evidence": {
+            "same_name_paths": proposal.duplicate_conflict_evidence.same_name_paths,
+            "byte_identical_paths": proposal.duplicate_conflict_evidence.byte_identical_paths,
+            "same_name_revisions": proposal.duplicate_conflict_evidence.same_name_revisions,
+            "byte_identical_revisions": proposal.duplicate_conflict_evidence.byte_identical_revisions,
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _checkpoint_mattermost_event(
     db_session: Session,
     *,
@@ -376,6 +759,40 @@ def checkpoint_mattermost_post(
         event_id=event_id,
         claim_owner=claim_owner,
         values={"mattermost_post_id": post_id, "state": "post_created"},
+    )
+
+
+def checkpoint_mattermost_delivery_mode(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    delivery_mode: MattermostResponseDeliveryMode,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"delivery_mode": delivery_mode.value},
+    )
+
+
+def checkpoint_mattermost_terminal_outcome(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    terminal_outcome: MattermostDeliveryTerminalOutcome,
+    post_id: str | None = None,
+) -> bool:
+    values: dict[str, object] = {"terminal_outcome": terminal_outcome.value}
+    if post_id is not None:
+        values["mattermost_post_id"] = post_id
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values=values,
     )
 
 
@@ -439,6 +856,7 @@ def complete_mattermost_answer_event(
     event_id: int,
     claim_owner: UUID,
     loaded_context_post_ids: frozenset[str] = frozenset(),
+    answer_post_ids: tuple[str, ...] | None = None,
 ) -> bool:
     event = db_session.scalar(
         select(MattermostEventState)
@@ -453,9 +871,13 @@ def complete_mattermost_answer_event(
     if event is None:
         db_session.rollback()
         return False
+    delivered_ephemeral = (
+        event.delivery_mode == MattermostResponseDeliveryMode.EPHEMERAL.value
+        and event.terminal_outcome == MattermostDeliveryTerminalOutcome.DELIVERED.value
+    )
     if (
         event.mapping_id is None
-        or event.mattermost_post_id is None
+        or (event.mattermost_post_id is None and not delivered_ephemeral)
         or event.onyx_assistant_message_id is None
         or event.rendered_message is None
     ):
@@ -470,7 +892,11 @@ def complete_mattermost_answer_event(
 
     mapping.parent_message_id = event.onyx_assistant_message_id
     answer_post_message_ids = dict(mapping.answer_post_message_ids)
-    answer_post_message_ids[event.mattermost_post_id] = event.onyx_assistant_message_id
+    post_ids = answer_post_ids or (
+        (event.mattermost_post_id,) if event.mattermost_post_id is not None else ()
+    )
+    for post_id in post_ids:
+        answer_post_message_ids[post_id] = event.onyx_assistant_message_id
     mapping.answer_post_message_ids = answer_post_message_ids
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:
@@ -516,6 +942,48 @@ def complete_mattermost_feedback_event(
         chat_message_id=chat_message_id,
         user_id=None,
         db_session=db_session,
+        commit=False,
+    )
+    db_session.flush()
+    event.feedback_id = feedback.id
+    event.state = "completed"
+    event.claim_owner = None
+    event.lease_expires_at = None
+    db_session.commit()
+    return True
+
+
+def complete_mattermost_interactive_feedback_event(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    chat_message_id: int,
+    is_positive: bool | None,
+    required_followup: bool | None,
+    feedback_text: str,
+) -> bool:
+    """Insert interactive answer feedback and complete its durable event."""
+    event = db_session.scalar(
+        select(MattermostEventState)
+        .where(
+            MattermostEventState.id == event_id,
+            MattermostEventState.claim_owner == claim_owner,
+            MattermostEventState.state != "completed",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if event is None:
+        db_session.rollback()
+        return False
+    feedback = create_chat_message_feedback(
+        is_positive=is_positive,
+        feedback_text=feedback_text,
+        chat_message_id=chat_message_id,
+        user_id=None,
+        db_session=db_session,
+        required_followup=required_followup,
         commit=False,
     )
     db_session.flush()

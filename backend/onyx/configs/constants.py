@@ -230,6 +230,7 @@ class DocumentSource(str, Enum):
     INGESTION_API = "ingestion_api"
     SLACK = "slack"
     MATTERMOST = "mattermost"
+    SEAFILE = "seafile"
     WEB = "web"
     GOOGLE_DRIVE = "google_drive"
     GMAIL = "gmail"
@@ -726,6 +727,7 @@ NUM_DAYS_TO_KEEP_INDEX_ATTEMPTS = NUM_DAYS_TO_KEEP_CHECKPOINTS + 1
 DocumentSourceDescription: dict[DocumentSource, str] = {
     DocumentSource.INGESTION_API: "Documents ingested via API",
     DocumentSource.SLACK: "Team messages and channel discussions",
+    DocumentSource.SEAFILE: "Files and folders from Seafile libraries",
     DocumentSource.WEB: "Indexed web pages",
     DocumentSource.GOOGLE_DRIVE: "Documents, spreadsheets, and presentations",
     DocumentSource.GMAIL: "Email conversations and threads",

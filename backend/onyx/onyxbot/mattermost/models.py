@@ -1,5 +1,6 @@
 """Typed models for Mattermost bot events."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
@@ -20,6 +21,16 @@ class MattermostNormalizedEventType(StrEnum):
     POST_UPDATE_RETRY = "post_update_retry"
     REACTION_FEEDBACK = "reaction_feedback"
     POST_DELETE_TOMBSTONE = "post_delete_tombstone"
+
+
+class MattermostResponseDeliveryMode(StrEnum):
+    PUBLIC_THREAD = "public_thread"
+    EPHEMERAL = "ephemeral"
+
+
+class MattermostDeliveryTerminalOutcome(StrEnum):
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
 
 
 @dataclass(frozen=True)
@@ -104,6 +115,9 @@ class MattermostListenerConfig:
     owned_answer_post_message_ids: dict[str, int] = field(default_factory=dict)
     processed_event_ids: list[str] = field(default_factory=list)
     bot_user_ids: frozenset[str] = frozenset()
+    managed_channel_config_resolver: (
+        Callable[[str], dict[str, object] | None] | None
+    ) = None
     max_seen_event_ids: int = 10_000
     initial_reconnect_backoff_seconds: float = 1.0
     max_reconnect_backoff_seconds: float = 30.0

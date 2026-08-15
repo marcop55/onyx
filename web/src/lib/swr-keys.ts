@@ -61,6 +61,12 @@ export const SWR_KEYS = {
   mattermostBot: (id: number) => `/api/manage/admin/mattermost-app/bots/${id}`,
   mattermostBotObservability: (id: number) =>
     `/api/manage/admin/mattermost-app/bots/${id}/observability`,
+  mattermostBotConfigs: (id: number) =>
+    `/api/manage/admin/mattermost-app/bots/${id}/config`,
+  mattermostChannelConfigs: (mattermostBotId: number) =>
+    `/api/manage/admin/mattermost-app/channel?mattermost_bot_id=${mattermostBotId}`,
+  mattermostChannelConfig: (id: number) =>
+    `/api/manage/admin/mattermost-app/channel/${id}`,
 
   // ── Google Connectors ─────────────────────────────────────────────────────
   googleConnectorCredentials: (service: "gmail" | "google-drive") =>

@@ -122,6 +122,31 @@ class MattermostClient:
         )
         return _post_from_mapping(cast(Mapping[object, object], response))
 
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        """Create a Mattermost ephemeral post visible only to one user."""
+
+        post_payload: dict[str, object] = {
+            "channel_id": channel_id,
+            "message": message,
+            "root_id": root_id,
+        }
+        if props is not None:
+            post_payload["props"] = props
+        response = await self._request_json(
+            "POST",
+            "/api/v4/posts/ephemeral",
+            json={"user_id": user_id, "post": post_payload},
+        )
+        return _post_from_mapping(cast(Mapping[object, object], response))
+
     async def find_post_by_idempotency_fields(
         self,
         *,
@@ -180,12 +205,21 @@ class MattermostClient:
             return ordered_posts
         return list(posts_by_id.values())
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
         """Update a Mattermost post message."""
+        payload: dict[str, object] = {"id": post_id, "message": message}
+        if props is not None:
+            payload["props"] = props
         response = await self._request_json(
             "PUT",
             f"/api/v4/posts/{post_id}",
-            json={"id": post_id, "message": message},
+            json=payload,
         )
         return _post_from_mapping(cast(Mapping[object, object], response))
 
@@ -221,6 +255,15 @@ class MattermostClient:
         return (
             payload.get("channel_id") == channel_id
             and payload.get("user_id") == user_id
+        )
+
+    async def get_channel_by_name(
+        self, *, team_id: str, channel_name: str
+    ) -> dict[str, object]:
+        """Resolve a Mattermost channel name within a team."""
+        return await self._request_json(
+            "GET",
+            f"/api/v4/teams/{team_id}/channels/name/{channel_name}",
         )
 
     async def get_file_info(self, file_id: str) -> MattermostFileInfo:

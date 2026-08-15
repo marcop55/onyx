@@ -12,7 +12,9 @@ from onyx.db.engine.sql_engine import get_session
 from onyx.db.mattermost_bot import (
     fetch_mattermost_bot,
     fetch_mattermost_bots,
+    fetch_mattermost_channel_config_for_bot_and_channel,
     insert_mattermost_bot,
+    insert_mattermost_channel_config,
     remove_mattermost_bot,
     update_mattermost_bot,
 )
@@ -108,6 +110,60 @@ def test_mattermost_bot_crud_is_idempotent_for_delete(db_session: Session) -> No
     remove_mattermost_bot(db_session=db_session, mattermost_bot_id=bot.id)
 
     assert fetch_mattermost_bots(db_session) == []
+
+
+def test_channel_config_lookup_ignores_disabled_channel_row_and_falls_back(
+    db_session: Session,
+) -> None:
+    bot = insert_mattermost_bot(
+        db_session=db_session,
+        name="fallback-bot",
+        url="https://mattermost.example.com",
+        enabled=True,
+        token="token",
+        bot_user_id="bot-user",
+        bot_username="onyxbot",
+    )
+    default_config = insert_mattermost_channel_config(
+        db_session=db_session,
+        mattermost_bot_id=bot.id,
+        channel_id=None,
+        channel_name=None,
+        persona_id=None,
+        channel_config={
+            "channel_name": None,
+            "respond_tag_only": False,
+            "response_style": "orka_concise",
+            "disabled": False,
+        },
+        is_default=True,
+        enabled=True,
+    )
+    insert_mattermost_channel_config(
+        db_session=db_session,
+        mattermost_bot_id=bot.id,
+        channel_id="channel-disabled",
+        channel_name="Disabled",
+        persona_id=None,
+        channel_config={
+            "channel_name": "Disabled",
+            "respond_tag_only": True,
+            "response_style": "orka_concise",
+            "disabled": False,
+        },
+        enabled=False,
+    )
+
+    resolved = fetch_mattermost_channel_config_for_bot_and_channel(
+        db_session,
+        instance_id="https://mattermost.example.com",
+        bot_user_id="bot-user",
+        channel_id="channel-disabled",
+    )
+
+    assert resolved is not None
+    assert resolved.id == default_config.id
+    assert resolved.channel_config["respond_tag_only"] is False
 
 
 def test_create_route_requires_admin_permission(db_session: Session) -> None:

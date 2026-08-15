@@ -90,15 +90,11 @@ def _no_ee_standard_answer_categories(
     return []
 
 
-def insert_slack_channel_config(
+def validate_standard_answer_categories_by_ids(
+    *,
     db_session: Session,
-    slack_bot_id: int,
-    persona_id: int | None,
-    channel_config: ChannelConfig,
     standard_answer_category_ids: list[int],
-    enable_auto_filters: bool,
-    is_default: bool = False,
-) -> SlackChannelConfig:
+) -> Sequence[Any]:
     versioned_fetch_standard_answer_categories_by_ids = (
         fetch_versioned_implementation_with_fallback(
             "onyx.db.standard_answer",
@@ -118,10 +114,25 @@ def insert_slack_channel_config(
             raise EERequiredError(
                 "Standard answers are a paid Enterprise Edition feature - enable EE or remove standard answer categories"
             )
-        else:
-            raise ValueError(
-                f"Some or all categories with ids {standard_answer_category_ids} do not exist"
-            )
+        raise ValueError(
+            f"Some or all categories with ids {standard_answer_category_ids} do not exist"
+        )
+    return existing_standard_answer_categories
+
+
+def insert_slack_channel_config(
+    db_session: Session,
+    slack_bot_id: int,
+    persona_id: int | None,
+    channel_config: ChannelConfig,
+    standard_answer_category_ids: list[int],
+    enable_auto_filters: bool,
+    is_default: bool = False,
+) -> SlackChannelConfig:
+    existing_standard_answer_categories = validate_standard_answer_categories_by_ids(
+        db_session=db_session,
+        standard_answer_category_ids=standard_answer_category_ids,
+    )
 
     if is_default:
         existing_default = db_session.scalar(
@@ -170,23 +181,10 @@ def update_slack_channel_config(
             f"Unable to find Slack channel config with ID {slack_channel_config_id}"
         )
 
-    versioned_fetch_standard_answer_categories_by_ids = (
-        fetch_versioned_implementation_with_fallback(
-            "onyx.db.standard_answer",
-            "fetch_standard_answer_categories_by_ids",
-            _no_ee_standard_answer_categories,
-        )
+    existing_standard_answer_categories = validate_standard_answer_categories_by_ids(
+        db_session=db_session,
+        standard_answer_category_ids=standard_answer_category_ids,
     )
-    existing_standard_answer_categories = (
-        versioned_fetch_standard_answer_categories_by_ids(
-            standard_answer_category_ids=standard_answer_category_ids,
-            db_session=db_session,
-        )
-    )
-    if len(existing_standard_answer_categories) != len(standard_answer_category_ids):
-        raise ValueError(
-            f"Some or all categories with ids {standard_answer_category_ids} do not exist"
-        )
 
     # update the config
     slack_channel_config.persona_id = persona_id

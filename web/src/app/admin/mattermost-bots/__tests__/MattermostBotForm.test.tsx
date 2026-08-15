@@ -1,7 +1,14 @@
 import { render, screen, setupUser, waitFor } from "@tests/setup/test-utils";
 import { MattermostBotForm } from "../MattermostBotForm";
 
+jest.mock("swr", () => ({
+  ...jest.requireActual("swr"),
+  __esModule: true,
+  default: jest.fn(() => ({ data: [], mutate: jest.fn() })),
+}));
+
 jest.mock("@opal/layouts", () => ({
+  ...jest.requireActual("@opal/layouts"),
   toast: {
     error: jest.fn(),
     success: jest.fn(),
@@ -112,6 +119,56 @@ test("updates Mattermost bot metadata without rotating token when the token fiel
         name: "renamed",
         url: "https://mattermost.example.com",
         enabled: false,
+      }),
+    })
+  );
+});
+
+test("adds managed private answer channel config from the Mattermost admin UI", async () => {
+  const user = setupUser();
+  const fetchSpy = jest.spyOn(global, "fetch");
+  fetchSpy.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({}),
+  } as Response);
+
+  render(
+    <MattermostBotForm
+      existingMattermostBot={{
+        id: 7,
+        name: "existing",
+        url: "https://mattermost.example.com",
+        enabled: true,
+        token: "",
+        bot_user_id: "bot-user",
+        bot_username: "onyxbot",
+        health_status: "ok",
+        health_error: null,
+      }}
+    />
+  );
+
+  expect(
+    screen.getByRole("heading", { name: /private answer channels/i })
+  ).toBeInTheDocument();
+  await user.type(
+    screen.getByLabelText(/mattermost channel id/i),
+    "channel-private-1"
+  );
+  await user.click(
+    screen.getByRole("button", { name: /add private answer channel/i })
+  );
+
+  await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+  expect(fetchSpy).toHaveBeenCalledWith(
+    "/api/manage/admin/mattermost-app/channel",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({
+        mattermost_bot_id: 7,
+        channel_id: "channel-private-1",
+        is_ephemeral: true,
+        enabled: true,
       }),
     })
   );

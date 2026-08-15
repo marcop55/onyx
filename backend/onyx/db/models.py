@@ -3459,6 +3459,8 @@ class MattermostEventState(Base):
     )
     mattermost_pending_post_id: Mapped[str] = mapped_column(String, nullable=False)
     mattermost_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    delivery_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    terminal_outcome: Mapped[str | None] = mapped_column(String, nullable=True)
     onyx_user_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
     )
@@ -3520,6 +3522,66 @@ class MattermostAttachment(Base):
     )
 
 
+class MattermostAttachmentPlacementProposal(Base):
+    __tablename__ = "mattermost_attachment_placement_proposal"
+    __table_args__ = (
+        UniqueConstraint(
+            "proposal_identity",
+            name="uq_mattermost_attachment_placement_proposal_identity",
+        ),
+        Index(
+            "ix_mattermost_attachment_placement_proposal_attachment_id",
+            "attachment_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    attachment_id: Mapped[int] = mapped_column(
+        ForeignKey("mattermost_attachment.id", ondelete="CASCADE"), nullable=False
+    )
+    proposal_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    mattermost_file_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_post_id: Mapped[str] = mapped_column(String, nullable=False)
+    uploader_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    library_id: Mapped[str] = mapped_column(String, nullable=False)
+    proposed_root: Mapped[str] = mapped_column(String, nullable=False)
+    proposed_path: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_filename: Mapped[str] = mapped_column(String, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    should_remain_temporary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    hierarchy_root_revision: Mapped[str] = mapped_column(String, nullable=False)
+    duplicate_conflict_evidence: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB(), nullable=False
+    )
+    audit_evidence: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+    rollback_data: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+    ingestion_freshness_proof: Mapped[str | None] = mapped_column(String, nullable=True)
+    readback_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    readback_revision: Mapped[str | None] = mapped_column(String, nullable=True)
+    promotion_confirmer_user_id: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    promotion_claimed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class MattermostBot(Base):
     __tablename__ = "mattermost_bot"
 
@@ -3543,6 +3605,69 @@ class MattermostBot(Base):
     )
     time_updated: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    channel_configs: Mapped[list["MattermostChannelConfig"]] = relationship(
+        "MattermostChannelConfig",
+        back_populates="mattermost_bot",
+        cascade="all, delete-orphan",
+    )
+
+
+class MattermostChannelConfig(Base):
+    __tablename__ = "mattermost_channel_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mattermost_bot_id: Mapped[int] = mapped_column(
+        ForeignKey("mattermost_bot.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    channel_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    persona_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persona.id", ondelete="SET NULL"), nullable=True
+    )
+    channel_config: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB(), nullable=False
+    )
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    is_ephemeral: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    mattermost_bot: Mapped[MattermostBot] = relationship(
+        "MattermostBot",
+        back_populates="channel_configs",
+    )
+    persona: Mapped["Persona | None"] = relationship("Persona")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "mattermost_bot_id",
+            "channel_id",
+            name="uq_mattermost_channel_config_bot_channel",
+        ),
+        Index(
+            "ix_mattermost_channel_config_bot_default",
+            "mattermost_bot_id",
+            "is_default",
+            unique=True,
+            postgresql_where=is_default.is_(true()),
+        ),
+        Index(
+            "ix_mattermost_channel_config_bot_enabled",
+            "mattermost_bot_id",
+            "enabled",
+        ),
     )
 
 
@@ -4466,9 +4591,13 @@ class ChannelConfig(TypedDict):
     answer_filters: NotRequired[list[AllowedAnswerFilters]]
     # If None then no follow up
     # If empty list, follow up with no tags
-    follow_up_tags: NotRequired[list[str]]
+    follow_up_tags: NotRequired[list[str] | None]
+    standard_answer_category_ids: NotRequired[list[int]]
     show_continue_in_web_ui: NotRequired[bool]  # defaults to False
     disabled: NotRequired[bool]  # defaults to False
+    response_style: NotRequired[str]
+    response_type: NotRequired[str]
+    include_source_previews: NotRequired[bool]
 
 
 class SlackChannelConfig(Base):
@@ -4481,7 +4610,7 @@ class SlackChannelConfig(Base):
     persona_id: Mapped[int | None] = mapped_column(
         ForeignKey("persona.id"), nullable=True
     )
-    channel_config: Mapped[ChannelConfig] = mapped_column(
+    channel_config: Mapped["ChannelConfig"] = mapped_column(
         postgresql.JSONB(), nullable=False
     )
 
@@ -4491,7 +4620,7 @@ class SlackChannelConfig(Base):
 
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    persona: Mapped[Persona | None] = relationship("Persona")
+    persona: Mapped["Persona | None"] = relationship("Persona")
 
     slack_bot: Mapped["SlackBot"] = relationship(
         "SlackBot",
