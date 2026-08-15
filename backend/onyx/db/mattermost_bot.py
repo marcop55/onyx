@@ -190,6 +190,7 @@ def fetch_mattermost_channel_config_for_bot_and_channel(
         select(MattermostChannelConfig).where(
             MattermostChannelConfig.mattermost_bot_id == bot.id,
             MattermostChannelConfig.channel_id == channel_id,
+            MattermostChannelConfig.enabled.is_(True),
         )
     )
     if channel_config is not None:
@@ -198,6 +199,7 @@ def fetch_mattermost_channel_config_for_bot_and_channel(
         select(MattermostChannelConfig).where(
             MattermostChannelConfig.mattermost_bot_id == bot.id,
             MattermostChannelConfig.is_default.is_(True),
+            MattermostChannelConfig.enabled.is_(True),
         )
     )
 

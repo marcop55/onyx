@@ -3,6 +3,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from onyx.db.mattermost_bot import (
+    fetch_mattermost_channel_config_for_bot_and_channel,
+)
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
     _build_mattermost_context,
@@ -123,6 +126,44 @@ def test_replay_safe_managed_config_preserves_bounded_controls_only() -> None:
     }
     assert "system_prompt" not in config
     assert "instructions" not in config
+
+
+def test_disabled_channel_config_row_falls_back_to_enabled_default() -> None:
+    disabled_channel_config = SimpleNamespace(
+        id=20,
+        channel_config={"respond_tag_only": True},
+    )
+    default_config = SimpleNamespace(
+        id=10,
+        channel_config={"respond_tag_only": False},
+    )
+    db_session = MagicMock()
+    scalar_calls = 0
+
+    def scalar(stmt: object) -> object | None:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        if scalar_calls == 1:
+            return SimpleNamespace(id=1)
+        stmt_text = str(stmt)
+        if scalar_calls == 2:
+            if "mattermost_channel_config.enabled IS true" in stmt_text:
+                return None
+            return disabled_channel_config
+        return default_config
+
+    db_session.scalar.side_effect = scalar
+
+    resolved = fetch_mattermost_channel_config_for_bot_and_channel(
+        db_session,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+        channel_id="channel-1",
+    )
+
+    assert resolved is default_config
+    assert resolved is not None
+    assert resolved.channel_config["respond_tag_only"] is False
 
 
 def _event(*, text: str) -> NormalizedMattermostEvent:
