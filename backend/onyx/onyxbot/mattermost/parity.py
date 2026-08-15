@@ -282,7 +282,7 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         mattermost_contract="Mattermost channel-reference filters require authentic indexed Mattermost history first.",
         status=MattermostParityStatus.PLATFORM_GAP,
         evidence=(
-            "backend/onyx/context/search/federated/slack_search.py:resolve_channel_references",
+            "backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:resolve_channel_references",
         ),
         guarantees=frozenset({"no_fake_connectors", "shared_full_corpus"}),
         fallback="Do not narrow retrieval by unindexed Mattermost channel claims until issue #37 ships.",

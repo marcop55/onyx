@@ -106,6 +106,22 @@ def test_replay_safe_entries_have_durable_or_idempotent_evidence() -> None:
         )
 
 
+def test_manifest_evidence_points_to_existing_owner_contracts() -> None:
+    missing_evidence: list[str] = []
+
+    for entry in MATTERMOST_SLACK_PARITY_MATRIX:
+        for evidence in entry.evidence:
+            evidence_path, _, anchor = evidence.partition(":")
+            path = _REPO_ROOT / evidence_path
+            if not path.is_file():
+                missing_evidence.append(f"{entry.key}: missing file {evidence_path}")
+                continue
+            if anchor and anchor not in path.read_text(encoding="utf-8"):
+                missing_evidence.append(f"{entry.key}: missing anchor {evidence}")
+
+    assert missing_evidence == []
+
+
 def test_primary_platform_gap_records_fallback_without_weakening_retrieval() -> None:
     matrix = matrix_by_key()
     private_permissions = matrix["per_user_private_onyx_permissions"]
