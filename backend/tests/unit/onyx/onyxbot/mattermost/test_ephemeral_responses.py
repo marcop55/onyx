@@ -775,9 +775,20 @@ class _RecordingClient:
         _ = channel_id, pending_post_id, event_key
         return None
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = props
         self.updated_posts.append({"post_id": post_id, "message": message})
         return MattermostPost(id=post_id, message=message)
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        _ = channel_id, user_id
+        return True
 
     async def get_file_info(self, file_id: str) -> MattermostFileInfo:
         raise AssertionError(f"unexpected file-info request: {file_id}")

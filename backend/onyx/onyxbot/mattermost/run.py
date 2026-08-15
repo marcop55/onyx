@@ -37,8 +37,10 @@ from onyx.onyxbot.mattermost.config import (
 )
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
+    dispatch_mattermost_mutation,
     handle_normalized_mattermost_event,
 )
+from onyx.onyxbot.mattermost.interactive import handle_mattermost_interactive_action
 from onyx.onyxbot.mattermost.listener import MattermostEventListener
 from onyx.onyxbot.mattermost.models import NormalizedMattermostEvent
 from onyx.onyxbot.mattermost.mutations import (
@@ -106,6 +108,10 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
             action_name=action_name,
         )
 
+    @app.post("/interactive")
+    async def interactive_action(request: Request) -> JSONResponse:
+        return await _handle_interactive_action_request(request, runtime_config)
+
     return app
 
 
@@ -164,6 +170,49 @@ async def _handle_slash_command_request(
             handle_event=handle_event,
         )
     return _slash_command_json_response(response)
+
+
+async def _handle_interactive_action_request(
+    request: Request,
+    config: MattermostBotConfig,
+) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            status_code=400, content={"text": "Invalid Mattermost action."}
+        )
+    async with MattermostClient(
+        config.url,
+        config.token,
+        request_timeout_seconds=config.request_timeout_seconds,
+    ) as client:
+        mutation_adapter: MattermostMutationAdapter | None = None
+        if config.mutation_gateway_factory is not None:
+            bridge = AuthoritativePlatformGatewayBridge.from_factory_spec(
+                config.mutation_gateway_factory
+            )
+            mutation_adapter = MattermostMutationAdapter(client, bridge)
+
+        async def dispatch_confirmed_mutation(
+            *, event: NormalizedMattermostEvent
+        ) -> bool:
+            return await dispatch_mattermost_mutation(
+                event=event,
+                client=client,
+                adapter=mutation_adapter,
+            )
+
+        with get_session_with_current_tenant() as db_session:
+            await handle_mattermost_interactive_action(
+                payload=payload,
+                signing_secret=config.token,
+                bot_user_id=config.listener_config.bot_user_id,
+                client=client,
+                db_session=db_session,
+                instance_id=canonical_mattermost_instance_id(config.url),
+                dispatch_mutation=dispatch_confirmed_mutation,
+            )
+    return JSONResponse(status_code=200, content={"text": ""})
 
 
 def _slash_command_json_response(
@@ -254,7 +303,15 @@ def _build_handler_config(
         owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,
         owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
         ephemeral_response_channel_ids=ephemeral_response_channel_ids,
+        interactive_signing_secret=config.token,
+        interactive_url=_interactive_action_url(config),
     )
+
+
+def _interactive_action_url(config: MattermostBotConfig) -> str:
+    host = getattr(config, "host", "127.0.0.1")
+    port = getattr(config, "port", 8091)
+    return f"http://{host}:{port}/interactive"
 
 
 def main() -> None:

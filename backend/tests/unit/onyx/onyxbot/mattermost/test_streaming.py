@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -712,11 +713,371 @@ async def test_ambiguous_post_replay_never_issues_second_post_after_search_miss(
     assert client.updated_posts == []
 
 
+@pytest.mark.asyncio
+async def test_unconfirmed_typed_mutation_attaches_confirmation_button_for_fresh_system_admin() -> (
+    None
+):
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+    from onyx.onyxbot.mattermost.mutations import MATTERMOST_MUTATION_COMMAND_PREFIX
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    command = (
+        MATTERMOST_MUTATION_COMMAND_PREFIX
+        + '{"action":"update","repo_id":"repo-1","path":"/automation/note.md",'
+        '"expected_revision":"rev-1","content":"new content",'
+        '"destination_path":null,"confirmed":false,"scope_prefix":"/automation"}'
+    )
+    client = _RecordingClient(
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        )
+    )
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.DIRECT_MESSAGE,
+        session_key="mattermost:dm:team-1:channel-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text=command,
+        dedupe_key="event_id:root-post-1",
+    )
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(
+                AgentResponseDelta(content="Review and confirm this admin action.")
+            ),
+        ]
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_persona_by_id",
+            return_value=MagicMock(id=456),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.handle_stream_message_objects",
+            return_value=packets,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(
+                persona_id=456,
+                mutation_adapter=cast(Any, object()),
+                interactive_signing_secret="secret",
+                interactive_url="http://127.0.0.1:8091/interactive",
+                bot_user_id="bot-user-1",
+            ),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    confirm_actions = _confirm_mutation_actions(client.updated_posts[0])
+    assert len(confirm_actions) == 1
+    assert cast(dict[str, object], confirm_actions[0]["integration"])["url"] == (
+        "http://127.0.0.1:8091/interactive"
+    )
+    assert client.membership_calls == [
+        ("channel-1", "bot-user-1"),
+        ("channel-1", "user-1"),
+    ]
+    assert client.identity_calls == ["user-1"]
+
+
+@pytest.mark.asyncio
+async def test_rendered_message_replay_restores_interactive_props_before_completion() -> (
+    None
+):
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+    from onyx.onyxbot.mattermost.mutations import MATTERMOST_MUTATION_COMMAND_PREFIX
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    command = (
+        MATTERMOST_MUTATION_COMMAND_PREFIX
+        + '{"action":"update","repo_id":"repo-1","path":"/automation/note.md",'
+        '"expected_revision":"rev-1","content":"new content",'
+        '"destination_path":null,"confirmed":false,"scope_prefix":"/automation"}'
+    )
+    client = _RecordingClient(
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        )
+    )
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.DIRECT_MESSAGE,
+        session_key="mattermost:dm:team-1:channel-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text=command,
+        dedupe_key="event_id:root-post-1",
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(
+                state="turn_created",
+                mattermost_post_id="bot-post-1",
+                onyx_assistant_message_id=22,
+                rendered_message="Review and confirm this admin action.",
+            ),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(
+                persona_id=456,
+                mutation_adapter=cast(Any, object()),
+                interactive_signing_secret="secret",
+                interactive_url="http://127.0.0.1:8091/interactive",
+                bot_user_id="bot-user-1",
+            ),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    assert len(client.updated_posts) == 1
+    confirm_actions = _confirm_mutation_actions(client.updated_posts[0])
+    assert len(confirm_actions) == 1
+    integration = cast(dict[str, object], confirm_actions[0]["integration"])
+    assert integration["url"] == "http://127.0.0.1:8091/interactive"
+    assert cast(dict[str, object], integration["context"])["action_value"]
+    assert client.membership_calls == [
+        ("channel-1", "bot-user-1"),
+        ("channel-1", "user-1"),
+    ]
+    assert client.identity_calls == ["user-1"]
+
+
+@pytest.mark.parametrize(
+    "memberships,identity",
+    [
+        (
+            [True, True],
+            MattermostUserInfo("user-1", "ordinary", "Ordinary", "system_user"),
+        ),
+        (
+            [True, True],
+            MattermostUserInfo("user-1", "stale", "Stale", "system_administer"),
+        ),
+        ([True, True], MattermostClientError("role lookup failed")),
+        (
+            [True, False],
+            MattermostUserInfo("user-1", "admin", "Admin", "system_admin"),
+        ),
+        ([False], MattermostUserInfo("user-1", "admin", "Admin", "system_admin")),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unconfirmed_typed_mutation_omits_confirmation_without_fresh_system_admin(
+    memberships: list[bool], identity: MattermostUserInfo | Exception
+) -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+    from onyx.onyxbot.mattermost.mutations import MATTERMOST_MUTATION_COMMAND_PREFIX
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    command = (
+        MATTERMOST_MUTATION_COMMAND_PREFIX
+        + '{"action":"update","repo_id":"repo-1","path":"/automation/note.md",'
+        '"expected_revision":"rev-1","content":"new content",'
+        '"destination_path":null,"confirmed":false,"scope_prefix":"/automation"}'
+    )
+    client = _RecordingClient(memberships=memberships, identity=identity)
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.DIRECT_MESSAGE,
+        session_key="mattermost:dm:team-1:channel-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text=command,
+        dedupe_key="event_id:root-post-1",
+    )
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(
+                AgentResponseDelta(content="Review and confirm this admin action.")
+            ),
+        ]
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_persona_by_id",
+            return_value=MagicMock(id=456),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.handle_stream_message_objects",
+            return_value=packets,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(
+                persona_id=456,
+                mutation_adapter=cast(Any, object()),
+                interactive_signing_secret="secret",
+                interactive_url="http://127.0.0.1:8091/interactive",
+                bot_user_id="bot-user-1",
+            ),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    assert _confirm_mutation_actions(client.updated_posts[0]) == []
+
+
+def _confirm_mutation_actions(
+    updated_post: dict[str, object],
+) -> list[dict[str, object]]:
+    actions = cast(
+        list[dict[str, object]],
+        cast(
+            list[dict[str, object]],
+            cast(dict[str, object], updated_post["props"])["attachments"],
+        )[0]["actions"],
+    )
+    return [action for action in actions if action["id"] == "confirm_mutation"]
+
+
 class _RecordingClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        memberships: list[bool] | None = None,
+        identity: MattermostUserInfo | Exception | None = None,
+    ) -> None:
         self.created_posts: list[dict[str, str]] = []
-        self.updated_posts: list[dict[str, str]] = []
+        self.updated_posts: list[dict[str, object]] = []
         self.reconciliation_requests: list[dict[str, str]] = []
+        self.memberships = memberships or [True, True]
+        self.identity = identity
+        self.membership_calls: list[tuple[str, str]] = []
+        self.identity_calls: list[str] = []
         self.create_error: MattermostClientError | None = None
         self.reconciliation_error: MattermostClientError | None = None
         self.reconciled_post: MattermostPost | None = None
@@ -783,8 +1144,17 @@ class _RecordingClient:
             return self.reconciled_post_after_create_error
         return self.reconciled_post
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
-        self.updated_posts.append({"post_id": post_id, "message": message})
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        updated_post: dict[str, object] = {"post_id": post_id, "message": message}
+        if props is not None:
+            updated_post["props"] = props
+        self.updated_posts.append(updated_post)
         return MattermostPost(
             id=post_id,
             message=message,
@@ -797,7 +1167,16 @@ class _RecordingClient:
         raise AssertionError(f"unexpected file-info request: {file_id}")
 
     async def get_user_info(self, user_id: str) -> MattermostUserInfo:
-        raise AssertionError(f"unexpected user-info request: {user_id}")
+        self.identity_calls.append(user_id)
+        if self.identity is None:
+            raise AssertionError(f"unexpected user-info request: {user_id}")
+        if isinstance(self.identity, Exception):
+            raise self.identity
+        return self.identity
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        self.membership_calls.append((channel_id, user_id))
+        return self.memberships.pop(0)
 
     async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]:
         _ = root_post_id
@@ -808,7 +1187,10 @@ class _RecordingClient:
 
 
 def _processing_claim(
-    state: str = "pending", mattermost_post_id: str | None = None
+    state: str = "pending",
+    mattermost_post_id: str | None = None,
+    onyx_assistant_message_id: int | None = None,
+    rendered_message: str | None = None,
 ) -> MattermostEventClaim:
     ledger_event = MattermostEventState(
         id=1,
@@ -820,6 +1202,8 @@ def _processing_claim(
         mattermost_pending_post_id="pending-1",
         mattermost_post_id=mattermost_post_id,
         state=state,
+        onyx_assistant_message_id=onyx_assistant_message_id,
+        rendered_message=rendered_message,
     )
     claim_owner = UUID("00000000-0000-0000-0000-000000000999")
     return MattermostEventClaim(

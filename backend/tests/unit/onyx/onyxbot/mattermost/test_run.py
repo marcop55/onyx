@@ -86,6 +86,7 @@ def test_handler_config_hydrates_managed_private_answer_channels(
         {"channel-private-1"}
     )
     assert handler_config.owned_thread_root_ids == {"owned-root-1"}
+    assert handler_config.interactive_url == "http://127.0.0.1:8091/interactive"
 
 
 def test_slash_command_runtime_uses_managed_private_answer_channels(

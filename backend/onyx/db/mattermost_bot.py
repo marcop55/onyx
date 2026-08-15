@@ -784,6 +784,48 @@ def complete_mattermost_feedback_event(
     return True
 
 
+def complete_mattermost_interactive_feedback_event(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    chat_message_id: int,
+    is_positive: bool | None,
+    required_followup: bool | None,
+    feedback_text: str,
+) -> bool:
+    """Insert interactive answer feedback and complete its durable event."""
+    event = db_session.scalar(
+        select(MattermostEventState)
+        .where(
+            MattermostEventState.id == event_id,
+            MattermostEventState.claim_owner == claim_owner,
+            MattermostEventState.state != "completed",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if event is None:
+        db_session.rollback()
+        return False
+    feedback = create_chat_message_feedback(
+        is_positive=is_positive,
+        feedback_text=feedback_text,
+        chat_message_id=chat_message_id,
+        user_id=None,
+        db_session=db_session,
+        required_followup=required_followup,
+        commit=False,
+    )
+    db_session.flush()
+    event.feedback_id = feedback.id
+    event.state = "completed"
+    event.claim_owner = None
+    event.lease_expires_at = None
+    db_session.commit()
+    return True
+
+
 def complete_mattermost_control_event(
     db_session: Session,
     *,

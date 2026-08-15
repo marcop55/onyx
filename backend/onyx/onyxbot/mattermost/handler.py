@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from typing import Any, cast
@@ -60,11 +60,13 @@ from onyx.onyxbot.mattermost.context import (
 from onyx.onyxbot.mattermost.formatting import (
     format_mattermost_answer as _format_mattermost_answer,
 )
+from onyx.onyxbot.mattermost.interactive import build_mattermost_answer_action_props
 from onyx.onyxbot.mattermost.models import (
     MattermostDeliveryTerminalOutcome,
     MattermostNormalizedEventType,
     MattermostPost,
     MattermostResponseDeliveryMode,
+    MattermostUserInfo,
     NormalizedMattermostEvent,
 )
 from onyx.onyxbot.mattermost.mutations import (
@@ -74,6 +76,7 @@ from onyx.onyxbot.mattermost.mutations import (
     MATTERMOST_MUTATION_UNAVAILABLE_MESSAGE,
     MattermostMutationAdapter,
     MattermostMutationPermissionError,
+    build_mattermost_confirmed_mutation_command,
     parse_mattermost_mutation_command,
 )
 from onyx.onyxbot.mattermost.session import (
@@ -120,6 +123,8 @@ class MattermostHandlerConfig:
     bot_user_id: str | None = None
     mutation_adapter: MattermostMutationAdapter | None = None
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
+    interactive_signing_secret: str | None = None
+    interactive_url: str | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -176,12 +181,14 @@ async def handle_normalized_mattermost_event(
     Returns False for events that do not route to Onyx chat.
     """
 
-    if await dispatch_mattermost_mutation(
-        event=event,
-        client=client,
-        adapter=config.mutation_adapter,
-    ):
-        return True
+    confirmed_mutation_command = build_mattermost_confirmed_mutation_command(event.text)
+    if confirmed_mutation_command is None:
+        if await dispatch_mattermost_mutation(
+            event=event,
+            client=client,
+            adapter=config.mutation_adapter,
+        ):
+            return True
 
     if event.event_type == MattermostNormalizedEventType.POST_DELETE_TOMBSTONE:
         mapping = get_mattermost_thread_mapping(
@@ -454,11 +461,24 @@ async def handle_normalized_mattermost_event(
                 return False
             if not renew_owner_fence():
                 return False
+            final_props_factory = _build_final_action_props_factory(
+                config=config,
+                client=client,
+                event=event,
+                post_id=ledger_event.mattermost_post_id,
+                mutation_command=confirmed_mutation_command,
+            )
             await client.update_post(
                 post_id=ledger_event.mattermost_post_id,
                 message=ledger_event.rendered_message,
+                props=await final_props_factory(
+                    ledger_event.onyx_assistant_message_id,
+                    ledger_event.rendered_message,
+                )
+                if final_props_factory is not None
+                else None,
             )
-            return complete_mattermost_answer_event(
+            if not complete_mattermost_answer_event(
                 db_session,
                 event_id=ledger_event.id,
                 claim_owner=claim_owner,
@@ -467,7 +487,15 @@ async def handle_normalized_mattermost_event(
                     if thread_context is not None
                     else frozenset()
                 ),
+            ):
+                return False
+            _record_owned_answer(
+                config=config,
+                event=event,
+                answer_post_id=ledger_event.mattermost_post_id,
+                message_id=ledger_event.onyx_assistant_message_id,
             )
+            return True
 
         post_id = ledger_event.mattermost_post_id
         if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
@@ -580,6 +608,13 @@ async def handle_normalized_mattermost_event(
             packets=packets,
             checkpoint_final=checkpoint_final,
             before_external_update=renew_owner_fence,
+            final_props_factory=_build_final_action_props_factory(
+                config=config,
+                client=client,
+                event=event,
+                post_id=post_id,
+                mutation_command=confirmed_mutation_command,
+            ),
             no_results_message=channel_filter_result.no_results_message,
         )
     except MattermostThreadTombstonedError:
@@ -820,12 +855,15 @@ def _resolve_mattermost_channel_config(
 ) -> Any | None:
     if config.bot_user_id is None:
         return None
-    return fetch_mattermost_channel_config_for_bot_and_channel(
+    channel_config = fetch_mattermost_channel_config_for_bot_and_channel(
         db_session,
         instance_id=config.instance_id,
         bot_user_id=config.bot_user_id,
         channel_id=event.channel_id,
     )
+    if channel_config is None or not isinstance(channel_config.channel_config, dict):
+        return None
+    return channel_config
 
 
 def _checkpoint_mattermost_turn_packets(
@@ -967,6 +1005,80 @@ def _build_mattermost_context(
     if thread_context is None:
         return base_context
     return base_context + "\n\n" + thread_context
+
+
+def _build_final_action_props_factory(
+    *,
+    config: MattermostHandlerConfig,
+    client: MattermostStreamingClient,
+    event: NormalizedMattermostEvent,
+    post_id: str,
+    mutation_command: str | None = None,
+) -> Callable[[int, str], Awaitable[dict[str, object] | None]] | None:
+    if config.interactive_signing_secret is None:
+        return None
+
+    async def final_action_props(
+        message_id: int,
+        final_message: str,
+    ) -> dict[str, object] | None:
+        authorized_mutation_command = None
+        if mutation_command is not None and config.mutation_adapter is not None:
+            current_user = await _authorize_mutation_attachment_user(
+                client=client,
+                event=event,
+                bot_user_id=config.bot_user_id,
+            )
+            if current_user is not None:
+                authorized_mutation_command = mutation_command
+        return build_mattermost_answer_action_props(
+            signing_secret=config.interactive_signing_secret or "",
+            interactive_url=config.interactive_url,
+            team_id=event.team_id,
+            channel_id=event.channel_id,
+            root_post_id=event.root_post_id,
+            answer_post_id=post_id,
+            answer_message_id=message_id,
+            requester_user_id=event.user_id,
+            sources=_extract_source_lines(final_message),
+            mutation_command=authorized_mutation_command,
+        )
+
+    return final_action_props
+
+
+async def _authorize_mutation_attachment_user(
+    *,
+    client: MattermostStreamingClient,
+    event: NormalizedMattermostEvent,
+    bot_user_id: str | None,
+) -> MattermostUserInfo | None:
+    if bot_user_id is None:
+        return None
+    try:
+        if not await client.is_channel_member(
+            channel_id=event.channel_id, user_id=bot_user_id
+        ):
+            return None
+        if not await client.is_channel_member(
+            channel_id=event.channel_id, user_id=event.user_id
+        ):
+            return None
+        current_user = await client.get_user_info(event.user_id)
+    except Exception:
+        return None
+    if current_user.id != event.user_id:
+        return None
+    if "system_admin" not in current_user.roles.split():
+        return None
+    return current_user
+
+
+def _extract_source_lines(final_message: str) -> tuple[str, ...]:
+    _, separator, sources_text = final_message.partition("\n\nSources:\n")
+    if not separator:
+        return ()
+    return tuple(line for line in sources_text.splitlines() if line.strip())
 
 
 def _response_root_id(event: NormalizedMattermostEvent) -> str:
