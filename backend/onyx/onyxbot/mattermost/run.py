@@ -16,9 +16,13 @@ from onyx.configs.app_configs import (
     POSTGRES_API_SERVER_POOL_SIZE,
 )
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
-from onyx.db.mattermost_bot import hydrate_mattermost_listener_config
+from onyx.db.mattermost_bot import (
+    get_or_bootstrap_mattermost_slash_command_config,
+    hydrate_mattermost_listener_config,
+)
 from onyx.onyxbot.mattermost.client import MattermostClient
 from onyx.onyxbot.mattermost.commands import (
+    MattermostSlashCommandControl,
     MattermostSlashCommandResponse,
     handle_mattermost_slash_command,
 )
@@ -116,6 +120,23 @@ async def _handle_slash_command_request(
             payload["text"] = f"{action_name} {text}".strip()
 
     instance_id = canonical_mattermost_instance_id(config.url)
+    with get_session_with_current_tenant() as db_session:
+        slash_command_config = get_or_bootstrap_mattermost_slash_command_config(
+            db_session,
+            instance_id=instance_id,
+            bot_user_id=config.listener_config.bot_user_id,
+            bootstrap_token=config.slash_command_bootstrap_token,
+        )
+    slash_command_control = (
+        MattermostSlashCommandControl(
+            instance_id=slash_command_config.instance_id,
+            bot_user_id=slash_command_config.bot_user_id,
+            token=slash_command_config.token.get_value(apply_mask=False),
+            enabled=slash_command_config.enabled,
+        )
+        if slash_command_config is not None and slash_command_config.token is not None
+        else None
+    )
     handler_config = MattermostHandlerConfig(
         persona_id=config.persona_id,
         instance_id=instance_id,
@@ -141,8 +162,7 @@ async def _handle_slash_command_request(
 
         response = await handle_mattermost_slash_command(
             payload=payload,
-            expected_token=config.slash_command_token,
-            bot_user_id=config.listener_config.bot_user_id,
+            command_control=slash_command_control,
             client=client,
             handle_event=handle_event,
         )

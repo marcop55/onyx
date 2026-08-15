@@ -14,6 +14,7 @@ from onyx.db.models import (
     ChatSession,
     MattermostAttachment,
     MattermostEventState,
+    MattermostSlashCommandConfig,
     MattermostThreadMapping,
 )
 from onyx.onyxbot.mattermost.models import MattermostListenerConfig
@@ -36,6 +37,71 @@ class MattermostEventClaim:
     outcome: MattermostClaimOutcome
     event: MattermostEventState
     claim_owner: UUID | None
+
+
+def fetch_mattermost_slash_command_config(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> MattermostSlashCommandConfig | None:
+    return db_session.scalar(
+        select(MattermostSlashCommandConfig).where(
+            MattermostSlashCommandConfig.instance_id == instance_id,
+            MattermostSlashCommandConfig.bot_user_id == bot_user_id,
+        )
+    )
+
+
+def upsert_mattermost_slash_command_config(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    token: str,
+    enabled: bool,
+) -> MattermostSlashCommandConfig:
+    config = fetch_mattermost_slash_command_config(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+    )
+    if config is None:
+        config = MattermostSlashCommandConfig(
+            instance_id=instance_id,
+            bot_user_id=bot_user_id,
+            token=token,
+            enabled=enabled,
+        )
+        db_session.add(config)
+    else:
+        config.token = token  # ty: ignore[invalid-assignment]
+        config.enabled = enabled
+    db_session.commit()
+    return config
+
+
+def get_or_bootstrap_mattermost_slash_command_config(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    bootstrap_token: str | None,
+) -> MattermostSlashCommandConfig | None:
+    config = fetch_mattermost_slash_command_config(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+    )
+    if config is not None or bootstrap_token is None:
+        return config
+    return upsert_mattermost_slash_command_config(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+        token=bootstrap_token,
+        enabled=True,
+    )
 
 
 def claim_durable_mattermost_event(

@@ -43,6 +43,14 @@ class MattermostSlashCommandClient(Protocol):
 
 
 @dataclass(frozen=True)
+class MattermostSlashCommandControl:
+    instance_id: str
+    bot_user_id: str
+    token: str
+    enabled: bool
+
+
+@dataclass(frozen=True)
 class MattermostSlashCommandResponse:
     text: str
     response_type: str = "ephemeral"
@@ -86,8 +94,9 @@ class MattermostSlashCommandPayload:
 async def handle_mattermost_slash_command(
     *,
     payload: Mapping[str, str],
-    expected_token: str | None,
-    bot_user_id: str,
+    command_control: MattermostSlashCommandControl | None = None,
+    expected_token: str | None = None,
+    bot_user_id: str | None = None,
     client: MattermostSlashCommandClient,
     handle_event: Callable[[NormalizedMattermostEvent], Awaitable[bool]],
 ) -> MattermostSlashCommandResponse:
@@ -99,7 +108,22 @@ async def handle_mattermost_slash_command(
     """
 
     command_payload = MattermostSlashCommandPayload.from_mapping(payload)
-    if not _is_valid_token(command_payload.token, expected_token):
+    expected_command_token = expected_token
+    authorized_bot_user_id = bot_user_id
+    if command_control is not None:
+        if not command_control.enabled:
+            return MattermostSlashCommandResponse(
+                text=MATTERMOST_SLASH_COMMAND_REJECTED_MESSAGE,
+                status_code=403,
+            )
+        expected_command_token = command_control.token
+        authorized_bot_user_id = command_control.bot_user_id
+    if authorized_bot_user_id is None:
+        return MattermostSlashCommandResponse(
+            text=MATTERMOST_SLASH_COMMAND_REJECTED_MESSAGE,
+            status_code=403,
+        )
+    if not _is_valid_token(command_payload.token, expected_command_token):
         return MattermostSlashCommandResponse(
             text=MATTERMOST_SLASH_COMMAND_REJECTED_MESSAGE,
             status_code=403,
@@ -112,7 +136,7 @@ async def handle_mattermost_slash_command(
     action, command_text = _parse_command_text(command_payload.text)
     user_info = await _authorize_and_resolve_sender(
         client=client,
-        bot_user_id=bot_user_id,
+        bot_user_id=authorized_bot_user_id,
         channel_id=command_payload.channel_id,
         user_id=command_payload.user_id,
     )

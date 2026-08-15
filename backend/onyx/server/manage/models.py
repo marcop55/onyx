@@ -15,6 +15,9 @@ from onyx.db.enums import (
 )
 from onyx.db.memory import MAX_MEMORIES_PER_USER
 from onyx.db.models import AllowedAnswerFilters, ChannelConfig, User
+from onyx.db.models import (
+    MattermostSlashCommandConfig as MattermostSlashCommandConfigModel,
+)
 from onyx.db.models import SlackBot as SlackAppModel
 from onyx.db.models import SlackChannelConfig as SlackChannelConfigModel
 from onyx.db.models import StandardAnswer as StandardAnswerModel
@@ -432,6 +435,37 @@ class SlackBot(BaseModel):
                 slack_bot_model.user_token.get_value(apply_mask=True)
                 if slack_bot_model.user_token
                 else None
+            ),
+        )
+
+
+class MattermostSlashCommandConfigRequest(BaseModel):
+    instance_id: str
+    bot_user_id: str
+    token: str
+    enabled: bool = True
+
+
+class MattermostSlashCommandConfig(BaseModel):
+    id: int
+    instance_id: str
+    bot_user_id: str
+    enabled: bool
+    token: str
+
+    @classmethod
+    def from_model(
+        cls, config_model: MattermostSlashCommandConfigModel
+    ) -> "MattermostSlashCommandConfig":
+        return cls(
+            id=config_model.id,
+            instance_id=config_model.instance_id,
+            bot_user_id=config_model.bot_user_id,
+            enabled=config_model.enabled,
+            token=(
+                config_model.token.get_value(apply_mask=True)
+                if config_model.token
+                else ""
             ),
         )
 

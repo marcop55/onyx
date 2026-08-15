@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from onyx.onyxbot.mattermost.commands import handle_mattermost_slash_command
+from onyx.onyxbot.mattermost.commands import (
+    MattermostSlashCommandControl,
+    handle_mattermost_slash_command,
+)
 from onyx.onyxbot.mattermost.models import (
     MattermostNormalizedEventType,
     MattermostUserInfo,
@@ -11,6 +14,7 @@ from onyx.onyxbot.mattermost.models import (
 
 _BOT_USER_ID = "bot_user_1"
 _COMMAND_TOKEN = "signed-token"
+_INSTANCE_ID = "https://mattermost.example.test"
 
 
 class _MattermostCommandClient:
@@ -60,6 +64,35 @@ def _payload(**overrides: str) -> dict[str, str]:
     }
     payload.update(overrides)
     return payload
+
+
+@pytest.mark.asyncio
+async def test_orka_slash_command_uses_managed_instance_control_before_side_effects() -> (
+    None
+):
+    handled = False
+
+    async def handle(_event: NormalizedMattermostEvent) -> bool:
+        nonlocal handled
+        handled = True
+        return True
+
+    response = await handle_mattermost_slash_command(
+        payload=_payload(),
+        command_control=MattermostSlashCommandControl(
+            instance_id=_INSTANCE_ID,
+            bot_user_id=_BOT_USER_ID,
+            token=_COMMAND_TOKEN,
+            enabled=False,
+        ),
+        client=_MattermostCommandClient(),
+        handle_event=handle,
+    )
+
+    assert response.status_code == 403
+    assert response.response_type == "ephemeral"
+    assert "not authorized" in response.text
+    assert not handled
 
 
 @pytest.mark.asyncio

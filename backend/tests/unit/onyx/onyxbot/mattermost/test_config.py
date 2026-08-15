@@ -18,7 +18,7 @@ from onyx.onyxbot.mattermost.config import (
     MATTERMOST_BOT_TOKEN_ENV,
     MATTERMOST_BOT_URL_ENV,
     MATTERMOST_BOT_USER_ID_ENV,
-    MATTERMOST_SLASH_COMMAND_TOKEN_ENV,
+    MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV,
     MattermostBotConfigError,
     canonical_mattermost_instance_id,
     load_mattermost_bot_config_from_env,
@@ -96,7 +96,7 @@ def test_load_mattermost_bot_config_from_env() -> None:
             "MATTERMOST_BOT_MENTIONS": "@onyx,@bot_user_1",
             "MATTERMOST_BOT_HOST": "127.0.0.1",
             "MATTERMOST_BOT_PORT": "8092",
-            MATTERMOST_SLASH_COMMAND_TOKEN_ENV: "slash-secret-token",
+            MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV: "slash-secret-token",
         }
     ):
         config = load_mattermost_bot_config_from_env()
@@ -114,7 +114,7 @@ def test_load_mattermost_bot_config_from_env() -> None:
     assert config.listener_config.allowed_team_ids == frozenset({"team_1"})
     assert config.listener_config.approved_user_ids == frozenset({"user_1", "user_2"})
     assert config.listener_config.root_post_channel_ids == frozenset({"channel_2"})
-    assert config.slash_command_token == "slash-secret-token"
+    assert config.slash_command_bootstrap_token == "slash-secret-token"
 
 
 def test_empty_emergency_restrictions_are_valid() -> None:
@@ -128,12 +128,15 @@ def test_empty_emergency_restrictions_are_valid() -> None:
 
 def test_redacted_mattermost_bot_env_never_returns_token_value() -> None:
     with _mattermost_env(
-        {**_REQUIRED_ENV, MATTERMOST_SLASH_COMMAND_TOKEN_ENV: "slash-secret-token"}
+        {
+            **_REQUIRED_ENV,
+            MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV: "slash-secret-token",
+        }
     ):
         redacted = redacted_mattermost_bot_env()
 
     assert redacted[MATTERMOST_BOT_TOKEN_ENV] == "[redacted]"
-    assert redacted[MATTERMOST_SLASH_COMMAND_TOKEN_ENV] == "[redacted]"
+    assert redacted[MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV] == "[redacted]"
     assert "mattermost-secret-token" not in str(redacted)
     assert "slash-secret-token" not in str(redacted)
 
