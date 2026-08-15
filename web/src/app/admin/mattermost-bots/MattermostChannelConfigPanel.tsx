@@ -23,13 +23,17 @@ import { useState } from "react";
 import useSWR from "swr";
 import * as Yup from "yup";
 
-type MattermostResponseStyle = "default" | "orka_concise";
+type MattermostResponseStyle = "default" | "orka_concise" | "detailed";
+type MattermostResponseType = "citations" | "quotes";
 
 interface MattermostChannelConfigFormValues {
   channel_id: string;
   channel_name: string;
   persona_id: string | null;
   response_style: MattermostResponseStyle;
+  response_type: MattermostResponseType;
+  include_source_previews: boolean;
+  answer_only_when_sourced: boolean;
   respond_tag_only: boolean;
   disabled: boolean;
 }
@@ -47,6 +51,13 @@ function valuesFromConfig(
       config?.channel_name ?? config?.channel_config.channel_name ?? "",
     persona_id: config?.persona?.id.toString() ?? null,
     response_style: config?.channel_config.response_style ?? "orka_concise",
+    response_type: config?.channel_config.response_type ?? "citations",
+    include_source_previews:
+      config?.channel_config.include_source_previews ?? false,
+    answer_only_when_sourced:
+      config?.channel_config.answer_filters?.includes(
+        "well_answered_postfilter"
+      ) ?? false,
     respond_tag_only: config?.channel_config.respond_tag_only ?? true,
     disabled: config?.channel_config.disabled ?? false,
   };
@@ -64,6 +75,11 @@ export function configRequestBody(
     persona_id: values.persona_id ? Number(values.persona_id) : null,
     respond_tag_only: values.respond_tag_only,
     response_style: values.response_style,
+    response_type: values.response_type,
+    include_source_previews: values.include_source_previews,
+    answer_filters: values.answer_only_when_sourced
+      ? ["well_answered_postfilter"]
+      : [],
     disabled: values.disabled,
     is_default: isDefault,
   });
@@ -163,8 +179,13 @@ export function MattermostChannelConfigPanel({
                 channel_name: Yup.string(),
                 persona_id: Yup.string().nullable(),
                 response_style: Yup.mixed<MattermostResponseStyle>()
-                  .oneOf(["default", "orka_concise"])
+                  .oneOf(["default", "orka_concise", "detailed"])
                   .required(),
+                response_type: Yup.mixed<MattermostResponseType>()
+                  .oneOf(["citations", "quotes"])
+                  .required(),
+                include_source_previews: Yup.boolean().required(),
+                answer_only_when_sourced: Yup.boolean().required(),
                 respond_tag_only: Yup.boolean().required(),
                 disabled: Yup.boolean().required(),
               })}
@@ -237,7 +258,24 @@ export function MattermostChannelConfigPanel({
                     options={[
                       { name: "Default Agent behaviour", value: "default" },
                       { name: "Orka concise", value: "orka_concise" },
+                      { name: "Detailed", value: "detailed" },
                     ]}
+                  />
+                  <SelectorFormField
+                    name="response_type"
+                    label="Sources display"
+                    options={[
+                      { name: "Citations", value: "citations" },
+                      { name: "Quotes", value: "quotes" },
+                    ]}
+                  />
+                  <CheckboxField
+                    name="include_source_previews"
+                    label="Show source previews"
+                  />
+                  <CheckboxField
+                    name="answer_only_when_sourced"
+                    label="Answer only when sources are found"
                   />
                   <CheckboxField
                     name="respond_tag_only"
@@ -291,7 +329,9 @@ export function MattermostChannelConfigPanel({
                   <TableCell>
                     {config.channel_config.response_style === "orka_concise"
                       ? "Orka concise"
-                      : "Default"}
+                      : config.channel_config.response_style === "detailed"
+                        ? "Detailed"
+                        : "Default"}
                   </TableCell>
                   <TableCell>
                     {config.channel_config.disabled ? (

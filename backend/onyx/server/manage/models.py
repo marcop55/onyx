@@ -477,6 +477,12 @@ class MattermostBot(BaseModel):
 class MattermostResponseStyle(str, Enum):
     DEFAULT = "default"
     ORKA_CONCISE = "orka_concise"
+    DETAILED = "detailed"
+
+
+class MattermostResponseType(str, Enum):
+    CITATIONS = "citations"
+    QUOTES = "quotes"
 
 
 class MattermostChannelConfigCreationRequest(BaseModel):
@@ -486,6 +492,9 @@ class MattermostChannelConfigCreationRequest(BaseModel):
     persona_id: int | None = None
     respond_tag_only: bool = True
     response_style: MattermostResponseStyle = MattermostResponseStyle.ORKA_CONCISE
+    response_type: MattermostResponseType = MattermostResponseType.CITATIONS
+    include_source_previews: bool = False
+    answer_filters: list[AllowedAnswerFilters] = Field(default_factory=list)
     disabled: bool = False
     is_default: bool = False
     is_ephemeral: bool = False

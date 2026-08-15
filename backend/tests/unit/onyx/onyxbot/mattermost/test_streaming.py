@@ -11,17 +11,22 @@ from onyx.context.search.models import SearchDoc
 from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
 from onyx.db.models import MattermostEventState
 from onyx.onyxbot.mattermost.client import MattermostClientError
+from onyx.onyxbot.mattermost.formatting import MATTERMOST_DEFAULT_MAX_PART_CHARS
 from onyx.onyxbot.mattermost.models import (
     MattermostFileInfo,
     MattermostPost,
+    MattermostResponseDeliveryMode,
     MattermostUserInfo,
+    NormalizedMattermostEvent,
 )
 from onyx.onyxbot.mattermost.streaming import (
+    MATTERMOST_NO_CITATIONS_MESSAGE,
     MATTERMOST_STREAM_FAILURE_SUFFIX,
     MattermostLeaseLostError,
     MattermostStreamResult,
     MattermostStreamVisibleError,
     stream_mattermost_answer,
+    stream_mattermost_ephemeral_answer,
 )
 from onyx.server.query_and_chat.models import MessageResponseIDInfo, SendMessageRequest
 from onyx.server.query_and_chat.streaming_models import (
@@ -237,6 +242,239 @@ async def test_stream_existing_post_checkpoints_render_before_final_put() -> Non
 
 
 @pytest.mark.asyncio
+async def test_stream_answer_filter_replaces_uncited_answer_with_no_citations_message() -> (
+    None
+):
+    client = _RecordingClient()
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content="uncited answer")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=100,
+        require_citations=True,
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="bot-post-1")
+    assert client.updated_posts == [
+        {"post_id": "bot-post-1", "message": MATTERMOST_NO_CITATIONS_MESSAGE}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_answer_filter_requires_citation_to_linked_source() -> None:
+    client = _RecordingClient()
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc(link="")])),
+            _packet(AgentResponseDelta(content="looks sourced [1].")),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=100,
+        require_citations=True,
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="bot-post-1")
+    assert client.updated_posts == [
+        {"post_id": "bot-post-1", "message": MATTERMOST_NO_CITATIONS_MESSAGE}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_answer_filter_suppresses_unsourced_partial_updates() -> None:
+    client = _RecordingClient()
+    unsourced_answer = "uncited answer " * 8
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content=unsourced_answer)),
+        ]
+    )
+
+    await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=20,
+        require_citations=True,
+    )
+
+    assert client.updated_posts == [
+        {"post_id": "bot-post-1", "message": MATTERMOST_NO_CITATIONS_MESSAGE}
+    ]
+    assert unsourced_answer.strip() not in {
+        update["message"] for update in client.updated_posts
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_over_limit_answer_emits_sequential_posts_with_sources_once() -> (
+    None
+):
+    client = _RecordingClient()
+    answer = "first cited paragraph [1].\n\n" + ("second paragraph " * 12)
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc()])),
+            _packet(AgentResponseDelta(content=answer)),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=packets,
+        min_update_chars=10_000,
+        max_part_chars=90,
+    )
+
+    assert result.message_id == 22
+    assert result.post_id == "checkpointed-post"
+    assert result.post_ids == (
+        "checkpointed-post",
+        "bot-post-1",
+        "bot-post-2",
+        "bot-post-3",
+    )
+    delivered_messages = [str(update["message"]) for update in client.updated_posts] + [
+        str(post["message"]) for post in client.created_posts
+    ]
+    assert all(len(message) <= 90 for message in delivered_messages)
+    assert "".join(delivered_messages).count("Sources:") == 1
+    assert client.updated_posts == [
+        {"post_id": "checkpointed-post", "message": "first cited paragraph [1]."}
+    ]
+    assert client.created_posts == [
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": "second paragraph second paragraph second paragraph second paragraph second paragraph",
+            "pending_post_id": "checkpointed-post:part:2",
+            "props": {"onyx_event_key": "checkpointed-post:part:2"},
+        },
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": "second paragraph second paragraph second paragraph second paragraph second paragraph",
+            "pending_post_id": "checkpointed-post:part:3",
+            "props": {"onyx_event_key": "checkpointed-post:part:3"},
+        },
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": "second paragraph second paragraph\n\nSources:\n[1] Mattermost Doc - https://example.test/doc",
+            "pending_post_id": "checkpointed-post:part:4",
+            "props": {"onyx_event_key": "checkpointed-post:part:4"},
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_over_limit_source_only_parts_remain_bounded() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(
+                AgentResponseStart(
+                    final_documents=[
+                        _search_doc(
+                            semantic_identifier="long-source-name-without-spaces" * 3,
+                            link="https://example.test/" + ("path" * 20),
+                            blurb="preview " * 20,
+                        )
+                    ]
+                )
+            ),
+            _packet(AgentResponseDelta(content="short cited [1].")),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=packets,
+        min_update_chars=10_000,
+        include_source_previews=True,
+        max_part_chars=max_part_chars,
+    )
+
+    delivered_messages = [str(update["message"]) for update in client.updated_posts] + [
+        str(post["message"]) for post in client.created_posts
+    ]
+    assert result.post_ids
+    assert all(len(message) <= max_part_chars for message in delivered_messages)
+    assert "".join(delivered_messages).count("Sources:") == 1
+    assert "long-source-name" in "".join(delivered_messages)
+
+
+@pytest.mark.asyncio
+async def test_stream_over_limit_replay_reuses_existing_split_post() -> None:
+    client = _RecordingClient()
+    client.reconciled_post = MattermostPost(
+        id="existing-part-2",
+        message="Sources:\n[1] Mattermost Doc - https://example.test/doc",
+        root_id="root-post-1",
+        user_id="bot-user-1",
+        channel_id="channel-1",
+        pending_post_id="checkpointed-post:part:2",
+        props={"onyx_event_key": "checkpointed-post:part:2"},
+    )
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc()])),
+            _packet(AgentResponseDelta(content="short cited [1].")),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=packets,
+        min_update_chars=10_000,
+        max_part_chars=70,
+    )
+
+    assert result.post_ids == ("checkpointed-post", "existing-part-2")
+    assert client.created_posts == []
+    assert client.reconciliation_requests == [
+        {
+            "channel_id": "channel-1",
+            "pending_post_id": "checkpointed-post:part:2",
+            "event_key": "checkpointed-post:part:2",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_stops_before_partial_update_when_owner_fence_is_lost() -> None:
     client = _RecordingClient()
     checks = iter([True, True, False])
@@ -307,6 +545,37 @@ async def test_stream_mattermost_answer_rate_bounds_partial_updates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_mattermost_answer_bounds_over_limit_partial_updates() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    oversized_delta = "partial answer " * 12
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content=oversized_delta)),
+        ]
+    )
+
+    await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=1,
+        max_part_chars=max_part_chars,
+    )
+
+    assert client.updated_posts
+    assert all(
+        len(str(update["message"])) <= max_part_chars for update in client.updated_posts
+    )
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.created_posts
+    )
+    assert any("pending_post_id" in post for post in client.created_posts)
+
+
+@pytest.mark.asyncio
 async def test_stream_mattermost_answer_failure_updates_existing_post_once() -> None:
     client = _RecordingClient()
     packets = iter(
@@ -333,6 +602,143 @@ async def test_stream_mattermost_answer_failure_updates_existing_post_once() -> 
             "message": "partial answer\n\n" + MATTERMOST_STREAM_FAILURE_SUFFIX,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_answer_bounds_failure_update_payload() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content="partial answer " * 12)),
+            StreamingError(error="model failed"),
+        ]
+    )
+
+    with pytest.raises(MattermostStreamVisibleError, match="model failed"):
+        await stream_mattermost_answer(
+            client=client,
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            min_update_chars=10_000,
+            max_part_chars=max_part_chars,
+        )
+
+    delivered_messages = _delivered_messages(client)
+    assert delivered_messages
+    assert all(len(message) <= max_part_chars for message in delivered_messages)
+    assert delivered_messages[-1].endswith(MATTERMOST_STREAM_FAILURE_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_answer_bounds_missing_message_failure_update() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter([_packet(AgentResponseDelta(content="partial answer " * 12))])
+
+    with pytest.raises(MattermostStreamVisibleError, match="Message ID is required"):
+        await stream_mattermost_answer(
+            client=client,
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            min_update_chars=10_000,
+            max_part_chars=max_part_chars,
+        )
+
+    delivered_messages = _delivered_messages(client)
+    assert delivered_messages
+    assert all(len(message) <= max_part_chars for message in delivered_messages)
+    assert delivered_messages[-1].endswith(MATTERMOST_STREAM_FAILURE_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_ephemeral_answer_bounds_final_payload() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc()])),
+            _packet(AgentResponseDelta(content="cited answer [1]. " + "more " * 40)),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_ephemeral_answer(
+        client=client,
+        user_id="user-1",
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        max_part_chars=max_part_chars,
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="ephemeral-post-1")
+    assert client.ephemeral_posts
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.ephemeral_posts
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_ephemeral_answer_bounds_failure_payload() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content="partial answer " * 12)),
+            StreamingError(error="model failed"),
+        ]
+    )
+
+    with pytest.raises(MattermostStreamVisibleError, match="model failed"):
+        await stream_mattermost_ephemeral_answer(
+            client=client,
+            user_id="user-1",
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            max_part_chars=max_part_chars,
+        )
+
+    assert client.ephemeral_posts
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.ephemeral_posts
+    )
+    assert str(client.ephemeral_posts[-1]["message"]).endswith(
+        MATTERMOST_STREAM_FAILURE_SUFFIX
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_ephemeral_answer_bounds_missing_message_failure() -> (
+    None
+):
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter([_packet(AgentResponseDelta(content="partial answer " * 12))])
+
+    with pytest.raises(MattermostStreamVisibleError, match="Message ID is required"):
+        await stream_mattermost_ephemeral_answer(
+            client=client,
+            user_id="user-1",
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            max_part_chars=max_part_chars,
+        )
+
+    assert client.ephemeral_posts
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.ephemeral_posts
+    )
+    assert str(client.ephemeral_posts[-1]["message"]).endswith(
+        MATTERMOST_STREAM_FAILURE_SUFFIX
+    )
 
 
 @pytest.mark.parametrize("ambiguous_create", [False, True])
@@ -437,9 +843,7 @@ async def test_handle_normalized_event_streams_and_records_parent_message(
         mock_handle_stream.call_args.kwargs["external_idempotency_key"]
         == "mattermost:event:1"
     )
-    assert client.created_posts == [
-        {"channel_id": "channel-1", "root_id": "root-post-1", "message": "..."}
-    ]
+    assert client.created_posts == [_checkpointed_placeholder_post()]
     assert client.updated_posts == [{"post_id": "bot-post-1", "message": "Onyx answer"}]
     mock_complete.assert_called_once()
 
@@ -531,9 +935,7 @@ async def test_handle_normalized_event_does_not_duplicate_visible_stream_failure
         )
 
     assert handled is True
-    assert client.created_posts == [
-        {"channel_id": "channel-1", "root_id": "root-post-1", "message": "..."}
-    ]
+    assert client.created_posts == [_checkpointed_placeholder_post()]
     assert client.updated_posts == [
         {
             "post_id": "bot-post-1",
@@ -929,6 +1331,150 @@ async def test_rendered_message_replay_restores_interactive_props_before_complet
     assert client.identity_calls == ["user-1"]
 
 
+@pytest.mark.parametrize("message_length", [15_000, 15_001])
+@pytest.mark.asyncio
+async def test_public_rendered_message_replay_bounds_external_payloads(
+    message_length: int,
+) -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    rendered_message = "x" * message_length
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(
+                state="turn_created",
+                mattermost_post_id="bot-post-1",
+                onyx_assistant_message_id=22,
+                rendered_message=rendered_message,
+                delivery_mode=MattermostResponseDeliveryMode.PUBLIC_THREAD,
+            ),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=_channel_mention_event(),
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    delivered_messages = _delivered_messages(client)
+    assert handled is True
+    assert delivered_messages
+    assert all(
+        len(message) <= MATTERMOST_DEFAULT_MAX_PART_CHARS
+        for message in delivered_messages
+    )
+    assert "".join(delivered_messages) == rendered_message
+    if message_length == MATTERMOST_DEFAULT_MAX_PART_CHARS:
+        assert client.created_posts == []
+    else:
+        assert client.created_posts == [
+            {
+                "channel_id": "channel-1",
+                "root_id": "root-post-1",
+                "message": "x",
+                "pending_post_id": "bot-post-1:part:2",
+                "props": {"onyx_event_key": "bot-post-1:part:2"},
+            }
+        ]
+
+
+@pytest.mark.parametrize("message_length", [15_000, 15_001])
+@pytest.mark.asyncio
+async def test_ephemeral_rendered_message_replay_bounds_external_payloads(
+    message_length: int,
+) -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    rendered_message = "x" * message_length
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(
+                state="turn_created",
+                onyx_assistant_message_id=22,
+                rendered_message=rendered_message,
+                delivery_mode=MattermostResponseDeliveryMode.EPHEMERAL,
+            ),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.renew_mattermost_event_lease",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_terminal_outcome",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=_slash_command_event(),
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    delivered_messages = [str(post["message"]) for post in client.ephemeral_posts]
+    assert handled is True
+    assert delivered_messages
+    assert all(
+        len(message) <= MATTERMOST_DEFAULT_MAX_PART_CHARS
+        for message in delivered_messages
+    )
+    if message_length == MATTERMOST_DEFAULT_MAX_PART_CHARS:
+        assert delivered_messages == [rendered_message]
+    else:
+        assert rendered_message not in delivered_messages
+
+
 @pytest.mark.parametrize(
     "memberships,identity",
     [
@@ -1064,6 +1610,12 @@ def _confirm_mutation_actions(
     return [action for action in actions if action["id"] == "confirm_mutation"]
 
 
+def _delivered_messages(client: "_RecordingClient") -> list[str]:
+    return [str(update["message"]) for update in client.updated_posts] + [
+        str(post["message"]) for post in client.created_posts
+    ]
+
+
 class _RecordingClient:
     def __init__(
         self,
@@ -1071,8 +1623,9 @@ class _RecordingClient:
         memberships: list[bool] | None = None,
         identity: MattermostUserInfo | Exception | None = None,
     ) -> None:
-        self.created_posts: list[dict[str, str]] = []
+        self.created_posts: list[dict[str, object]] = []
         self.updated_posts: list[dict[str, object]] = []
+        self.ephemeral_posts: list[dict[str, object]] = []
         self.reconciliation_requests: list[dict[str, str]] = []
         self.memberships = memberships or [True, True]
         self.identity = identity
@@ -1092,18 +1645,27 @@ class _RecordingClient:
         pending_post_id: str | None = None,
         props: dict[str, object] | None = None,
     ) -> MattermostPost:
-        _ = pending_post_id, props
-        self.created_posts.append(
-            {"channel_id": channel_id, "root_id": root_id, "message": message}
-        )
+        created_post: dict[str, object] = {
+            "channel_id": channel_id,
+            "root_id": root_id,
+            "message": message,
+        }
+        if pending_post_id is not None:
+            created_post["pending_post_id"] = pending_post_id
+        if props is not None:
+            created_post["props"] = props
+        self.created_posts.append(created_post)
         if self.create_error is not None:
             raise self.create_error
+        post_id = f"bot-post-{len(self.created_posts)}"
         return MattermostPost(
-            id="bot-post-1",
+            id=post_id,
             message=message,
             root_id=root_id,
             user_id="bot-user-1",
             channel_id=channel_id,
+            pending_post_id=pending_post_id or "",
+            props=props or {},
         )
 
     async def create_ephemeral_post(
@@ -1115,7 +1677,15 @@ class _RecordingClient:
         root_id: str = "",
         props: dict[str, object] | None = None,
     ) -> MattermostPost:
-        _ = props
+        ephemeral_post: dict[str, object] = {
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "root_id": root_id,
+            "message": message,
+        }
+        if props is not None:
+            ephemeral_post["props"] = props
+        self.ephemeral_posts.append(ephemeral_post)
         return MattermostPost(
             id="ephemeral-post-1",
             message=message,
@@ -1191,6 +1761,7 @@ def _processing_claim(
     mattermost_post_id: str | None = None,
     onyx_assistant_message_id: int | None = None,
     rendered_message: str | None = None,
+    delivery_mode: MattermostResponseDeliveryMode | None = None,
 ) -> MattermostEventClaim:
     ledger_event = MattermostEventState(
         id=1,
@@ -1204,6 +1775,7 @@ def _processing_claim(
         state=state,
         onyx_assistant_message_id=onyx_assistant_message_id,
         rendered_message=rendered_message,
+        delivery_mode=delivery_mode.value if delivery_mode is not None else None,
     )
     claim_owner = UUID("00000000-0000-0000-0000-000000000999")
     return MattermostEventClaim(
@@ -1211,17 +1783,70 @@ def _processing_claim(
     )
 
 
+def _checkpointed_placeholder_post() -> dict[str, object]:
+    return {
+        "channel_id": "channel-1",
+        "root_id": "root-post-1",
+        "message": "...",
+        "pending_post_id": "pending-1",
+        "props": {"onyx_event_key": "1"},
+    }
+
+
+def _channel_mention_event() -> NormalizedMattermostEvent:
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+
+    return NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+        session_key="mattermost:channel:team-1:channel-1:root-post-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text="what changed?",
+        dedupe_key="event_id:root-post-1",
+    )
+
+
+def _slash_command_event() -> NormalizedMattermostEvent:
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+
+    return NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.SLASH_COMMAND,
+        session_key="mattermost:slash:team-1:channel-1:user-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text="what changed?",
+        dedupe_key="event_id:root-post-1",
+    )
+
+
 def _packet(obj: PacketObj) -> Packet:
     return Packet(placement=Placement(turn_index=0), obj=obj)
 
 
-def _search_doc() -> SearchDoc:
+def _search_doc(
+    *,
+    semantic_identifier: str = "Mattermost Doc",
+    link: str = "https://example.test/doc",
+    blurb: str = "",
+) -> SearchDoc:
     return SearchDoc(
         document_id="doc-1",
         chunk_ind=0,
-        semantic_identifier="Mattermost Doc",
-        link="https://example.test/doc",
-        blurb="",
+        semantic_identifier=semantic_identifier,
+        link=link,
+        blurb=blurb,
         source_type=DocumentSource.WEB,
         boost=0,
         hidden=False,

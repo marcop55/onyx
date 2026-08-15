@@ -114,7 +114,7 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="channel_response_controls",
         area=SlackCapabilityArea.CHANNEL,
         slack_capability="Slack respond-tag-only, root response, allowlist, and response visibility controls.",
-        mattermost_contract="Managed Mattermost channel configs keep mention-only defaults and expose bounded response style controls without owning hidden base prompt/personality; visible thread replies preserve citations and safety-critical detail.",
+        mattermost_contract="Managed Mattermost channel configs keep mention-only defaults and expose bounded response style, source-display, source-preview and answer-only-when-sourced controls without owning hidden base prompt/personality; visible thread replies preserve citations and safety-critical detail.",
         status=MattermostParityStatus.DIRECT_MATTERMOST_FEATURE,
         evidence=(
             "backend/onyx/db/models.py:ChannelConfig",
@@ -124,6 +124,7 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
             "backend/onyx/onyxbot/mattermost/listener.py:MattermostEventNormalizer",
             "backend/onyx/onyxbot/mattermost/handler.py:_build_mattermost_context",
             "backend/tests/unit/onyx/onyxbot/mattermost/test_channel_config.py:test_replay_safe_managed_config_preserves_bounded_controls_only",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_response_presentation.py:test_answer_only_when_sourced_filter_fails_closed_without_visible_answer",
             *_MEMBERSHIP_EVIDENCE,
         ),
         guarantees=frozenset(
@@ -132,6 +133,7 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
                 "membership_fail_closed",
                 "no_hidden_prompt_forks",
                 "shared_full_corpus",
+                "answer_only_when_sourced",
                 "steady_state_managed_config",
             }
         ),
@@ -246,13 +248,16 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="citations_and_source_links",
         area=SlackCapabilityArea.SEARCH,
         slack_capability="Slack answer blocks with citations and source links.",
-        mattermost_contract="Mattermost renders answer citations and sources as Markdown links without hidden credentials.",
+        mattermost_contract="Mattermost renders answer citations, quote-style source previews, normalized Markdown, and deterministic over-limit answer parts with sources emitted once and without hidden credentials.",
         status=MattermostParityStatus.MATTERMOST_NATIVE_EQUIVALENT,
         evidence=(
             "backend/onyx/onyxbot/mattermost/formatting.py:format_mattermost_answer",
             "backend/onyx/onyxbot/mattermost/streaming.py:stream_mattermost_answer",
+            "backend/onyx/onyxbot/mattermost/handler.py:checkpoint_mattermost_rendered_message",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_response_presentation.py:test_success_formats_managed_citations_markdown_source_preview_and_split_once",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_response_presentation.py:test_replay_rendering_is_deterministic_and_emits_citations_once",
         ),
-        guarantees=frozenset({"shared_full_corpus"}),
+        guarantees=frozenset({"shared_full_corpus", "replay_safe"}),
     ),
     SlackToMattermostCapability(
         key="chat_feedback",
