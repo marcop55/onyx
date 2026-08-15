@@ -3522,6 +3522,60 @@ class MattermostAttachment(Base):
     )
 
 
+class MattermostAttachmentPlacementProposal(Base):
+    __tablename__ = "mattermost_attachment_placement_proposal"
+    __table_args__ = (
+        UniqueConstraint(
+            "proposal_identity",
+            name="uq_mattermost_attachment_placement_proposal_identity",
+        ),
+        Index(
+            "ix_mattermost_attachment_placement_proposal_attachment_id",
+            "attachment_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    attachment_id: Mapped[int] = mapped_column(
+        ForeignKey("mattermost_attachment.id", ondelete="CASCADE"), nullable=False
+    )
+    proposal_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    mattermost_file_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_post_id: Mapped[str] = mapped_column(String, nullable=False)
+    uploader_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    library_id: Mapped[str] = mapped_column(String, nullable=False)
+    proposed_root: Mapped[str] = mapped_column(String, nullable=False)
+    proposed_path: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_filename: Mapped[str] = mapped_column(String, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    should_remain_temporary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    hierarchy_root_revision: Mapped[str] = mapped_column(String, nullable=False)
+    duplicate_conflict_evidence: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB(), nullable=False
+    )
+    audit_evidence: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+    rollback_data: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+    ingestion_freshness_proof: Mapped[str | None] = mapped_column(String, nullable=True)
+    readback_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    readback_revision: Mapped[str | None] = mapped_column(String, nullable=True)
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class MattermostBot(Base):
     __tablename__ = "mattermost_bot"
 

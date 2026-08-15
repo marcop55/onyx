@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit, urlunsplit
@@ -15,6 +16,7 @@ from onyx.db.models import (
     ChannelConfig,
     ChatSession,
     MattermostAttachment,
+    MattermostAttachmentPlacementProposal,
     MattermostBot,
     MattermostChannelConfig,
     MattermostEventState,
@@ -25,6 +27,12 @@ from onyx.onyxbot.mattermost.models import (
     MattermostDeliveryTerminalOutcome,
     MattermostListenerConfig,
     MattermostResponseDeliveryMode,
+)
+from onyx.onyxbot.mattermost.placement import (
+    MattermostAttachmentPlacementProposal as MattermostAttachmentPlacementProposalDTO,
+)
+from onyx.onyxbot.mattermost.placement import (
+    MattermostAttachmentPromotionReceipt,
 )
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
@@ -542,6 +550,104 @@ def record_mattermost_attachment(
     assert attachment is not None
     db_session.commit()
     return attachment
+
+
+def record_mattermost_attachment_placement_proposal(
+    db_session: Session,
+    *,
+    proposal: MattermostAttachmentPlacementProposalDTO,
+) -> MattermostAttachmentPlacementProposal:
+    proposal_identity = mattermost_attachment_placement_proposal_identity(proposal)
+    duplicate_conflict_evidence = {
+        "same_name_paths": proposal.duplicate_conflict_evidence.same_name_paths,
+        "byte_identical_paths": proposal.duplicate_conflict_evidence.byte_identical_paths,
+        "same_name_revisions": proposal.duplicate_conflict_evidence.same_name_revisions,
+        "byte_identical_revisions": proposal.duplicate_conflict_evidence.byte_identical_revisions,
+    }
+    inserted_id = db_session.scalar(
+        postgresql.insert(MattermostAttachmentPlacementProposal)
+        .values(
+            attachment_id=proposal.identity.attachment_id,
+            proposal_identity=proposal_identity,
+            mattermost_file_id=proposal.identity.mattermost_file_id,
+            source_post_id=proposal.identity.source_post_id,
+            uploader_user_id=proposal.identity.uploader_user_id,
+            channel_id=proposal.identity.channel_id,
+            root_post_id=proposal.identity.root_post_id,
+            sha256=proposal.identity.sha256,
+            library_id=proposal.library_id,
+            proposed_root=proposal.proposed_root,
+            proposed_path=proposal.proposed_path,
+            normalized_filename=proposal.normalized_filename,
+            rationale=proposal.rationale,
+            confidence=proposal.confidence,
+            should_remain_temporary=proposal.should_remain_temporary,
+            hierarchy_root_revision=proposal.hierarchy_root_revision,
+            duplicate_conflict_evidence=duplicate_conflict_evidence,
+        )
+        .on_conflict_do_nothing(
+            constraint="uq_mattermost_attachment_placement_proposal_identity"
+        )
+        .returning(MattermostAttachmentPlacementProposal.id)
+    )
+    if inserted_id is None:
+        existing = db_session.scalar(
+            select(MattermostAttachmentPlacementProposal).where(
+                MattermostAttachmentPlacementProposal.proposal_identity
+                == proposal_identity
+            )
+        )
+        assert existing is not None
+        db_session.commit()
+        return existing
+    placement = db_session.get(MattermostAttachmentPlacementProposal, inserted_id)
+    assert placement is not None
+    db_session.commit()
+    return placement
+
+
+def record_mattermost_attachment_promotion_receipt(
+    db_session: Session,
+    *,
+    proposal_id: int,
+    receipt: MattermostAttachmentPromotionReceipt,
+) -> MattermostAttachmentPlacementProposal:
+    proposal = db_session.get(MattermostAttachmentPlacementProposal, proposal_id)
+    if proposal is None:
+        raise ValueError("Mattermost attachment placement proposal not found")
+    proposal.audit_evidence = receipt.audit_evidence
+    proposal.rollback_data = receipt.rollback_data
+    proposal.ingestion_freshness_proof = receipt.ingestion_freshness_proof
+    proposal.readback_file_id = receipt.readback_file_id
+    proposal.readback_revision = receipt.readback_revision
+    db_session.commit()
+    return proposal
+
+
+def mattermost_attachment_placement_proposal_identity(
+    proposal: MattermostAttachmentPlacementProposalDTO,
+) -> str:
+    payload = {
+        "attachment_id": proposal.identity.attachment_id,
+        "mattermost_file_id": proposal.identity.mattermost_file_id,
+        "source_post_id": proposal.identity.source_post_id,
+        "uploader_user_id": proposal.identity.uploader_user_id,
+        "channel_id": proposal.identity.channel_id,
+        "root_post_id": proposal.identity.root_post_id,
+        "sha256": proposal.identity.sha256,
+        "library_id": proposal.library_id,
+        "proposed_path": proposal.proposed_path,
+        "hierarchy_root_revision": proposal.hierarchy_root_revision,
+        "duplicate_conflict_evidence": {
+            "same_name_paths": proposal.duplicate_conflict_evidence.same_name_paths,
+            "byte_identical_paths": proposal.duplicate_conflict_evidence.byte_identical_paths,
+            "same_name_revisions": proposal.duplicate_conflict_evidence.same_name_revisions,
+            "byte_identical_revisions": proposal.duplicate_conflict_evidence.byte_identical_revisions,
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _checkpoint_mattermost_event(
