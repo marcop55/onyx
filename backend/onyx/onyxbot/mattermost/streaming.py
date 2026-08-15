@@ -97,6 +97,7 @@ async def stream_mattermost_answer(
     response_type: str = "citations",
     include_source_previews: bool = False,
     require_citations: bool = False,
+    no_results_message: str | None = None,
 ) -> MattermostStreamResult:
     """Create or resume one Mattermost post and update it from Onyx packets."""
 
@@ -170,7 +171,9 @@ async def stream_mattermost_answer(
         )
         raise MattermostStreamVisibleError("Message ID is required")
 
-    if require_citations and not citations:
+    if no_results_message and not top_documents and not citations:
+        final_message = no_results_message
+    elif require_citations and not citations:
         final_message = MATTERMOST_NO_CITATIONS_MESSAGE
     else:
         final_message = format_mattermost_answer(
@@ -211,6 +214,7 @@ async def stream_mattermost_ephemeral_answer(
     before_external_update: Callable[[], bool] | None = None,
     before_ephemeral_delivery: Callable[[], bool] | None = None,
     after_ephemeral_delivery: Callable[[str], bool] | None = None,
+    no_results_message: str | None = None,
     props: dict[str, object] | None = None,
     response_type: str = "citations",
     include_source_previews: bool = False,
@@ -273,7 +277,9 @@ async def stream_mattermost_ephemeral_answer(
         )
         raise MattermostStreamVisibleError("Message ID is required")
 
-    if require_citations and not citations:
+    if no_results_message and not top_documents and not citations:
+        final_message = no_results_message
+    elif require_citations and not citations:
         final_message = MATTERMOST_NO_CITATIONS_MESSAGE
     else:
         final_message = format_mattermost_answer(

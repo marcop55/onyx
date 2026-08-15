@@ -8,7 +8,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.orm import Session
 
+from onyx.configs.constants import DocumentSource
+from onyx.context.search.models import BaseFilters, Tag
 from onyx.db.models import MattermostThreadMapping
+from onyx.onyxbot.mattermost.channel_filters import MattermostChannelFilterResult
 from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
@@ -364,3 +367,53 @@ def test_normal_user_chat_keeps_shared_full_corpus_tool_selection(
     assert request.allowed_tool_ids is None
     assert captured["bypass_acl"] is False
     assert "system_admin" not in str(captured["additional_context"])
+
+
+def test_channel_filter_chat_request_keeps_response_style_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handle_stream_message_objects(**kwargs: object) -> tuple[()]:
+        captured.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(
+        "onyx.onyxbot.mattermost.handler.get_persona_by_id",
+        lambda **_kwargs: SimpleNamespace(id=7),
+    )
+    monkeypatch.setattr(
+        "onyx.onyxbot.mattermost.handler.handle_stream_message_objects",
+        fake_handle_stream_message_objects,
+    )
+    target = MattermostChatTarget(
+        chat_session_id=uuid4(),
+        parent_message_id=11,
+        persona_id=7,
+        mapping=cast(MattermostThreadMapping, SimpleNamespace()),
+    )
+
+    packets = _stream_mattermost_answer_packets(
+        db_session=cast(Session, SimpleNamespace()),
+        event=event(source_username="ordinary", source_display_name="Ordinary User"),
+        target=target,
+        config=MattermostHandlerConfig(persona_id=7),
+        service_user=SimpleNamespace(id=uuid4()),
+        file_descriptors=[],
+        external_idempotency_key="mattermost:event:1",
+        channel_filter_result=MattermostChannelFilterResult(
+            message="summarize #town-square",
+            tags=[Tag(tag_key="channel_id", tag_value="channel-id-1")],
+            no_results_message="no indexed data",
+        ),
+        response_style="orka_concise",
+    )
+    assert list(packets) == []
+
+    request = cast(SendMessageRequest, captured["new_msg_req"])
+    assert request.message == "summarize #town-square"
+    assert request.internal_search_filters == BaseFilters(
+        source_type=[DocumentSource.MATTERMOST],
+        tags=[Tag(tag_key="channel_id", tag_value="channel-id-1")],
+    )
+    assert "friendly and concise" in str(captured["additional_context"])
