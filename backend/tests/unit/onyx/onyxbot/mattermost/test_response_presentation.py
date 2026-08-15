@@ -5,6 +5,7 @@ from onyx.onyxbot.mattermost.client import mattermost_event_from_payload
 from onyx.onyxbot.mattermost.formatting import (
     MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR,
     format_mattermost_answer,
+    format_mattermost_answer_parts,
     should_skip_mattermost_answer,
 )
 from onyx.onyxbot.mattermost.handler import _build_mattermost_context
@@ -27,7 +28,7 @@ def test_success_formats_managed_citations_markdown_source_preview_and_split_onc
         ),
         response_type="citations",
         include_source_previews=True,
-        max_part_chars=92,
+        max_part_chars=130,
     )
 
     assert "<b>" not in rendered
@@ -88,6 +89,29 @@ def test_replay_rendering_is_deterministic_and_emits_citations_once() -> None:
     assert first == second
     assert first.count("Sources:") == 1
     assert first.count("> Preview text") == 1
+
+
+def test_source_only_chunks_are_bounded_with_oversized_source_entry() -> None:
+    max_part_chars = 72
+    parts = format_mattermost_answer_parts(
+        _answer(
+            answer="Use this [[1]]().",
+            top_documents=[
+                _search_doc(
+                    blurb="preview " * 20,
+                    semantic_identifier="oversized-source-name-without-spaces" * 3,
+                    link="https://example.test/" + ("path" * 20),
+                )
+            ],
+        ),
+        include_source_previews=True,
+        max_part_chars=max_part_chars,
+    )
+
+    assert all(len(part) <= max_part_chars for part in parts)
+    assert parts[0] == "Use this [[1]]()."
+    assert "".join(parts[1:]).count("Sources:") == 1
+    assert "oversized-source-name" in "".join(parts[1:])
 
 
 def test_primary_failure_mode_preserves_agent_prompt_ownership_for_style_controls() -> (
@@ -158,12 +182,17 @@ def _answer(
     )
 
 
-def _search_doc(*, blurb: str) -> SearchDoc:
+def _search_doc(
+    *,
+    blurb: str,
+    semantic_identifier: str = "Mattermost Doc",
+    link: str = "https://example.test/doc",
+) -> SearchDoc:
     return SearchDoc(
         document_id="doc-1",
         chunk_ind=0,
-        semantic_identifier="Mattermost Doc",
-        link="https://example.test/doc",
+        semantic_identifier=semantic_identifier,
+        link=link,
         blurb=blurb,
         source_type=DocumentSource.WEB,
         boost=0,

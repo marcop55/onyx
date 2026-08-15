@@ -109,7 +109,19 @@ def should_skip_mattermost_answer(
     if bypass_filters or channel_config is None:
         return False
     answer_filters = channel_config.get("answer_filters") or []
-    return "well_answered_postfilter" in answer_filters and not answer.citation_info
+    return (
+        "well_answered_postfilter" in answer_filters
+        and not has_linked_mattermost_source(answer.citation_info, answer.top_documents)
+    )
+
+
+def has_linked_mattermost_source(
+    citations: list[CitationInfo], top_documents: list[SearchDoc]
+) -> bool:
+    return any(
+        document is not None and bool(document.link)
+        for _, document in _cited_documents(citations, top_documents)
+    )
 
 
 def _cited_documents(
@@ -167,8 +179,10 @@ def _split_answer_with_sources_once(
     sources: str,
     max_part_chars: int,
 ) -> list[str]:
-    if max_part_chars <= len(sources) + 2:
-        return [answer, sources]
+    if len(sources) > max_part_chars:
+        return _split_text(answer, max_part_chars) + _split_text(
+            sources, max_part_chars
+        )
     if len(answer) + len(sources) + 2 <= max_part_chars:
         return [answer + "\n\n" + sources]
 

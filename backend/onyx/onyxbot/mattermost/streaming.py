@@ -13,6 +13,7 @@ from onyx.onyxbot.mattermost.formatting import (
     MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR,
     format_mattermost_answer,
     format_mattermost_answer_parts,
+    has_linked_mattermost_source,
 )
 from onyx.onyxbot.mattermost.models import (
     MattermostFileInfo,
@@ -193,7 +194,9 @@ async def stream_mattermost_answer(
 
     if no_results_message and not top_documents and not citations:
         final_messages = [no_results_message]
-    elif require_citations and not citations:
+    elif require_citations and not has_linked_mattermost_source(
+        citations, top_documents
+    ):
         final_messages = [MATTERMOST_NO_CITATIONS_MESSAGE]
     else:
         final_messages = format_mattermost_answer_parts(
@@ -307,7 +310,9 @@ async def stream_mattermost_ephemeral_answer(
 
     if no_results_message and not top_documents and not citations:
         final_message = no_results_message
-    elif require_citations and not citations:
+    elif require_citations and not has_linked_mattermost_source(
+        citations, top_documents
+    ):
         final_message = MATTERMOST_NO_CITATIONS_MESSAGE
     else:
         final_message = format_mattermost_answer(

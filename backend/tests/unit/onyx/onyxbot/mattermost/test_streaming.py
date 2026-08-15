@@ -265,6 +265,33 @@ async def test_stream_answer_filter_replaces_uncited_answer_with_no_citations_me
 
 
 @pytest.mark.asyncio
+async def test_stream_answer_filter_requires_citation_to_linked_source() -> None:
+    client = _RecordingClient()
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc(link="")])),
+            _packet(AgentResponseDelta(content="looks sourced [1].")),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=100,
+        require_citations=True,
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="bot-post-1")
+    assert client.updated_posts == [
+        {"post_id": "bot-post-1", "message": MATTERMOST_NO_CITATIONS_MESSAGE}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_answer_filter_suppresses_unsourced_partial_updates() -> None:
     client = _RecordingClient()
     unsourced_answer = "uncited answer " * 8
@@ -356,6 +383,49 @@ async def test_stream_over_limit_answer_emits_sequential_posts_with_sources_once
             "props": {"onyx_event_key": "checkpointed-post:part:4"},
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_over_limit_source_only_parts_remain_bounded() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(
+                AgentResponseStart(
+                    final_documents=[
+                        _search_doc(
+                            semantic_identifier="long-source-name-without-spaces" * 3,
+                            link="https://example.test/" + ("path" * 20),
+                            blurb="preview " * 20,
+                        )
+                    ]
+                )
+            ),
+            _packet(AgentResponseDelta(content="short cited [1].")),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=packets,
+        min_update_chars=10_000,
+        include_source_previews=True,
+        max_part_chars=max_part_chars,
+    )
+
+    delivered_messages = [str(update["message"]) for update in client.updated_posts] + [
+        str(post["message"]) for post in client.created_posts
+    ]
+    assert result.post_ids
+    assert all(len(message) <= max_part_chars for message in delivered_messages)
+    assert "".join(delivered_messages).count("Sources:") == 1
+    assert "long-source-name" in "".join(delivered_messages)
 
 
 @pytest.mark.asyncio
@@ -1394,13 +1464,18 @@ def _packet(obj: PacketObj) -> Packet:
     return Packet(placement=Placement(turn_index=0), obj=obj)
 
 
-def _search_doc() -> SearchDoc:
+def _search_doc(
+    *,
+    semantic_identifier: str = "Mattermost Doc",
+    link: str = "https://example.test/doc",
+    blurb: str = "",
+) -> SearchDoc:
     return SearchDoc(
         document_id="doc-1",
         chunk_ind=0,
-        semantic_identifier="Mattermost Doc",
-        link="https://example.test/doc",
-        blurb="",
+        semantic_identifier=semantic_identifier,
+        link=link,
+        blurb=blurb,
         source_type=DocumentSource.WEB,
         boost=0,
         hidden=False,
