@@ -283,6 +283,50 @@ def test_uncompleted_replayed_fallback_ids_reach_durable_admission() -> None:
     assert second_event.dedupe_key == first_event.dedupe_key
 
 
+def test_fallback_ids_distinguish_post_edit_revisions_and_dedupe_exact_replay() -> None:
+    normalizer = MattermostEventNormalizer(_config())
+
+    def edited_envelope(
+        *, update_at: int, file_ids: tuple[str, ...]
+    ) -> MattermostEventEnvelope:
+        return MattermostEventEnvelope(
+            event="post_edited",
+            channel_id="channel_1",
+            channel_type="O",
+            team_id="team_1",
+            user_id=_APPROVED_USER_ID,
+            post=MattermostPost(
+                id="post_root_1",
+                message="@onyx same text",
+                user_id=_APPROVED_USER_ID,
+                channel_id="channel_1",
+                update_at=update_at,
+                file_ids=file_ids,
+            ),
+        )
+
+    first_revision = normalizer.normalize(
+        edited_envelope(update_at=1786720000100, file_ids=("file_a",))
+    )
+    exact_replay = normalizer.normalize(
+        edited_envelope(update_at=1786720000100, file_ids=("file_a",))
+    )
+    timestamp_revision = normalizer.normalize(
+        edited_envelope(update_at=1786720000200, file_ids=("file_a",))
+    )
+    attachment_revision = normalizer.normalize(
+        edited_envelope(update_at=1786720000200, file_ids=("file_a", "file_b"))
+    )
+
+    assert first_revision is not None
+    assert exact_replay is not None
+    assert timestamp_revision is not None
+    assert attachment_revision is not None
+    assert exact_replay.dedupe_key == first_revision.dedupe_key
+    assert timestamp_revision.dedupe_key != first_revision.dedupe_key
+    assert attachment_revision.dedupe_key != timestamp_revision.dedupe_key
+
+
 def test_root_allowlisted_post_emits_normalized_event_when_enabled() -> None:
     normalizer = MattermostEventNormalizer(_config())
 

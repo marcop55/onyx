@@ -319,6 +319,96 @@ async def test_post_file_ids_are_saved_as_turn_attachments() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_only_owned_thread_post_is_audited_and_ingests_attachments() -> None:
+    db_session = MagicMock()
+    db_session.scalar.return_value = None
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.THREAD_REPLY_FOLLOWUP,
+        session_key="mattermost:channel:team-1:channel-1:post-root-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="post-file-only-1",
+        root_post_id="post-root-1",
+        user_id="user-1",
+        text="   ",
+        raw_event_type="posted",
+        file_ids=("mm-file-1",),
+        dedupe_key="event_id:file-only-1",
+    )
+    client = MagicMock()
+    client.get_file_info = AsyncMock(
+        return_value=MattermostFileInfo(
+            id="mm-file-1",
+            uploader_user_id="user-1",
+            post_id="post-file-only-1",
+            filename="only-file.txt",
+            mime_type="text/plain",
+            size_bytes=7,
+        )
+    )
+    client.download_file = AsyncMock(return_value=b"content")
+    client.create_post = AsyncMock()
+    client.update_post = AsyncMock()
+    file_store = MagicMock()
+    file_store.save_file.return_value = "stored-file-only-1"
+    service_user = MagicMock()
+    service_user.id = UUID("00000000-0000-0000-0000-000000000456")
+    target = _target()
+    target.mapping.id = 7
+    claim = _processing_claim()
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ) as mock_get_target,
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=claim,
+        ) as mock_claim,
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=service_user,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_default_file_store",
+            return_value=file_store,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.record_mattermost_attachment",
+        ) as mock_record_attachment,
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_control_event",
+            return_value=True,
+        ) as mock_complete,
+        patch(
+            "onyx.onyxbot.mattermost.handler.handle_stream_message_objects"
+        ) as mock_handle_stream,
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=db_session,
+        )
+
+    assert handled is True
+    mock_get_target.assert_called_once()
+    mock_claim.assert_called_once()
+    client.get_file_info.assert_awaited_once_with("mm-file-1")
+    client.download_file.assert_awaited_once_with("mm-file-1")
+    mock_record_attachment.assert_called_once()
+    mock_complete.assert_called_once_with(
+        db_session,
+        event_id=claim.event.id,
+        claim_owner=claim.claim_owner,
+    )
+    mock_handle_stream.assert_not_called()
+    client.create_post.assert_not_awaited()
+    client.update_post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_attachment_metadata_for_another_post_fails_before_content_read() -> None:
     db_session = MagicMock()
     db_session.scalar.return_value = None

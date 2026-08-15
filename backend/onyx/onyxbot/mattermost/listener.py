@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -322,7 +323,16 @@ class MattermostEventNormalizer:
             )
         if envelope.post is not None:
             content_digest = hashlib.sha256(
-                envelope.post.message.encode("utf-8")
+                json.dumps(
+                    {
+                        "message": envelope.post.message,
+                        "file_ids": envelope.post.file_ids,
+                        "create_at": envelope.post.create_at,
+                        "update_at": envelope.post.update_at,
+                        "delete_at": envelope.post.delete_at,
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
             ).hexdigest()
             return f"fallback:{envelope.event}:{envelope.post.id}:{content_digest}"
         return (

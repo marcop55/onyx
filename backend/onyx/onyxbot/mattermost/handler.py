@@ -217,7 +217,7 @@ async def handle_normalized_mattermost_event(
             db_session.rollback()
             raise
 
-    if not event.text.strip():
+    if not event.text.strip() and not event.file_ids:
         return False
 
     try:
@@ -256,6 +256,12 @@ async def handle_normalized_mattermost_event(
             ledger_event=claim.event,
             service_user_id=service_user.id,
         )
+        if not event.text.strip():
+            return complete_mattermost_control_event(
+                db_session,
+                event_id=claim.event.id,
+                claim_owner=claim_owner,
+            )
 
         def renew_owner_fence() -> bool:
             return renew_mattermost_event_lease(
