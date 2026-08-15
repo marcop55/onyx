@@ -345,6 +345,7 @@ async def handle_normalized_mattermost_event(
                 client=client,
                 event=event,
                 message=MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+                delivery_mode=_resolve_delivery_mode(event=event, config=config),
             )
             return complete_mattermost_control_event(
                 db_session,

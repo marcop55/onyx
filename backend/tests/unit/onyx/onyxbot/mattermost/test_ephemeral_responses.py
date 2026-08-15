@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import TracebackType
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -191,6 +192,65 @@ async def test_private_persona_denial_never_posts_public_identity_leak() -> None
         }
     ]
     calls.complete.assert_not_called()
+
+
+@pytest.mark.parametrize("entrypoint", ["slash", "private_channel"])
+@pytest.mark.asyncio
+async def test_channel_filter_denial_preserves_ephemeral_delivery(
+    entrypoint: str,
+) -> None:
+    from onyx.onyxbot.mattermost.channel_filters import (
+        MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+        MattermostChannelFilterResolutionError,
+    )
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(id=7),
+    )
+    event = replace(
+        _slash_event() if entrypoint == "slash" else _channel_event(),
+        text="summarize in:secret",
+    )
+    config = MattermostHandlerConfig(
+        persona_id=456,
+        ephemeral_response_channel_ids=frozenset(
+            {"channel-1"} if entrypoint == "private_channel" else set()
+        ),
+    )
+
+    with (
+        _patched_chat_path(target=target),
+        patch(
+            "onyx.onyxbot.mattermost.handler.resolve_mattermost_channel_filters",
+            side_effect=MattermostChannelFilterResolutionError("denied"),
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=config,
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    assert client.created_posts == []
+    assert client.created_ephemeral_posts == [
+        {
+            "user_id": "sender-1",
+            "channel_id": "channel-1",
+            "root_id": "" if entrypoint == "slash" else "root-post-1",
+            "message": MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+        }
+    ]
 
 
 @pytest.mark.asyncio
