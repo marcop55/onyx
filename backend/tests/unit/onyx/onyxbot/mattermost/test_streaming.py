@@ -832,6 +832,103 @@ async def test_unconfirmed_typed_mutation_attaches_confirmation_button_for_fresh
     assert client.identity_calls == ["user-1"]
 
 
+@pytest.mark.asyncio
+async def test_rendered_message_replay_restores_interactive_props_before_completion() -> (
+    None
+):
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+    from onyx.onyxbot.mattermost.mutations import MATTERMOST_MUTATION_COMMAND_PREFIX
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    command = (
+        MATTERMOST_MUTATION_COMMAND_PREFIX
+        + '{"action":"update","repo_id":"repo-1","path":"/automation/note.md",'
+        '"expected_revision":"rev-1","content":"new content",'
+        '"destination_path":null,"confirmed":false,"scope_prefix":"/automation"}'
+    )
+    client = _RecordingClient(
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        )
+    )
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.DIRECT_MESSAGE,
+        session_key="mattermost:dm:team-1:channel-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text=command,
+        dedupe_key="event_id:root-post-1",
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(
+                state="turn_created",
+                mattermost_post_id="bot-post-1",
+                onyx_assistant_message_id=22,
+                rendered_message="Review and confirm this admin action.",
+            ),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(
+                persona_id=456,
+                mutation_adapter=cast(Any, object()),
+                interactive_signing_secret="secret",
+                interactive_url="http://127.0.0.1:8091/interactive",
+                bot_user_id="bot-user-1",
+            ),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    assert len(client.updated_posts) == 1
+    confirm_actions = _confirm_mutation_actions(client.updated_posts[0])
+    assert len(confirm_actions) == 1
+    integration = cast(dict[str, object], confirm_actions[0]["integration"])
+    assert integration["url"] == "http://127.0.0.1:8091/interactive"
+    assert cast(dict[str, object], integration["context"])["action_value"]
+    assert client.membership_calls == [
+        ("channel-1", "bot-user-1"),
+        ("channel-1", "user-1"),
+    ]
+    assert client.identity_calls == ["user-1"]
+
+
 @pytest.mark.parametrize(
     "memberships,identity",
     [
@@ -1090,7 +1187,10 @@ class _RecordingClient:
 
 
 def _processing_claim(
-    state: str = "pending", mattermost_post_id: str | None = None
+    state: str = "pending",
+    mattermost_post_id: str | None = None,
+    onyx_assistant_message_id: int | None = None,
+    rendered_message: str | None = None,
 ) -> MattermostEventClaim:
     ledger_event = MattermostEventState(
         id=1,
@@ -1102,6 +1202,8 @@ def _processing_claim(
         mattermost_pending_post_id="pending-1",
         mattermost_post_id=mattermost_post_id,
         state=state,
+        onyx_assistant_message_id=onyx_assistant_message_id,
+        rendered_message=rendered_message,
     )
     claim_owner = UUID("00000000-0000-0000-0000-000000000999")
     return MattermostEventClaim(

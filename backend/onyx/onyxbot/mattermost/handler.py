@@ -461,11 +461,24 @@ async def handle_normalized_mattermost_event(
                 return False
             if not renew_owner_fence():
                 return False
+            final_props_factory = _build_final_action_props_factory(
+                config=config,
+                client=client,
+                event=event,
+                post_id=ledger_event.mattermost_post_id,
+                mutation_command=confirmed_mutation_command,
+            )
             await client.update_post(
                 post_id=ledger_event.mattermost_post_id,
                 message=ledger_event.rendered_message,
+                props=await final_props_factory(
+                    ledger_event.onyx_assistant_message_id,
+                    ledger_event.rendered_message,
+                )
+                if final_props_factory is not None
+                else None,
             )
-            return complete_mattermost_answer_event(
+            if not complete_mattermost_answer_event(
                 db_session,
                 event_id=ledger_event.id,
                 claim_owner=claim_owner,
@@ -474,7 +487,15 @@ async def handle_normalized_mattermost_event(
                     if thread_context is not None
                     else frozenset()
                 ),
+            ):
+                return False
+            _record_owned_answer(
+                config=config,
+                event=event,
+                answer_post_id=ledger_event.mattermost_post_id,
+                message_id=ledger_event.onyx_assistant_message_id,
             )
+            return True
 
         post_id = ledger_event.mattermost_post_id
         if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
