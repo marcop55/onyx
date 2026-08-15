@@ -70,6 +70,9 @@ export function MattermostBotForm({
   const { data: channelConfigs, mutate: mutateChannelConfigs } = useSWR<
     MattermostChannelConfig[]
   >(channelConfigKey, errorHandlingFetcher);
+  const privateAnswerChannelConfigs = (channelConfigs ?? []).filter(
+    (channelConfig) => !channelConfig.is_default && channelConfig.is_ephemeral
+  );
   const initialValues: MattermostBotFormValues = {
     name: existingMattermostBot?.name ?? "",
     url: existingMattermostBot?.url ?? "",
@@ -218,7 +221,7 @@ export function MattermostBotForm({
             )}
           </Formik>
           <div className="space-y-2">
-            {(channelConfigs ?? []).map((channelConfig) => (
+            {privateAnswerChannelConfigs.map((channelConfig) => (
               <div
                 className="flex items-center justify-between rounded border border-border p-3"
                 key={channelConfig.id}
@@ -259,7 +262,7 @@ export function MattermostBotForm({
                 </Button>
               </div>
             ))}
-            {(channelConfigs ?? []).length === 0 && (
+            {privateAnswerChannelConfigs.length === 0 && (
               <div className="text-sm text-muted-foreground">
                 No private answer channels configured.
               </div>

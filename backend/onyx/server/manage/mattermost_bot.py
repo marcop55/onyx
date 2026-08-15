@@ -18,17 +18,29 @@ from onyx.db.mattermost_bot import (
     update_mattermost_bot,
     update_mattermost_channel_config,
 )
-from onyx.db.models import User
+from onyx.db.models import ChannelConfig, User
 from onyx.onyxbot.mattermost.client import MattermostClient, MattermostClientError
+from onyx.onyxbot.mattermost.config import canonical_mattermost_instance_id
 from onyx.onyxbot.mattermost.models import MattermostUserInfo
 from onyx.server.manage.models import (
     MattermostBot,
     MattermostBotCreationRequest,
     MattermostChannelConfig,
-    MattermostChannelConfigRequest,
+    MattermostChannelConfigCreationRequest,
 )
 
 router = APIRouter(prefix="/manage")
+
+
+def _form_channel_config(
+    request: MattermostChannelConfigCreationRequest,
+) -> ChannelConfig:
+    return {
+        "channel_name": request.channel_name,
+        "respond_tag_only": request.respond_tag_only,
+        "response_style": request.response_style.value,
+        "disabled": request.disabled,
+    }
 
 
 async def validate_mattermost_bot_identity(url: str, token: str) -> MattermostUserInfo:
@@ -76,13 +88,27 @@ def create_bot(
     mattermost_bot_model = insert_mattermost_bot(
         db_session=db_session,
         name=mattermost_bot_creation_request.name,
-        url=mattermost_bot_creation_request.url,
+        url=canonical_mattermost_instance_id(mattermost_bot_creation_request.url),
         enabled=mattermost_bot_creation_request.enabled,
         token=mattermost_bot_creation_request.token,
         bot_user_id=identity.id,
         bot_username=identity.username,
         health_status="ok",
         health_error=None,
+    )
+    insert_mattermost_channel_config(
+        db_session=db_session,
+        mattermost_bot_id=mattermost_bot_model.id,
+        channel_id=None,
+        channel_name=None,
+        persona_id=None,
+        channel_config={
+            "channel_name": None,
+            "respond_tag_only": True,
+            "response_style": "orka_concise",
+            "disabled": False,
+        },
+        is_default=True,
     )
     return MattermostBot.from_model(mattermost_bot_model)
 
@@ -108,7 +134,7 @@ def patch_bot(
         db_session=db_session,
         mattermost_bot_id=mattermost_bot_id,
         name=mattermost_bot_creation_request.name,
-        url=mattermost_bot_creation_request.url,
+        url=canonical_mattermost_instance_id(mattermost_bot_creation_request.url),
         enabled=mattermost_bot_creation_request.enabled,
         token=token,
         bot_user_id=identity.id,
@@ -147,7 +173,7 @@ def list_bots(
 
 @router.post("/admin/mattermost-app/channel")
 def create_mattermost_channel_config(
-    request: MattermostChannelConfigRequest,
+    request: MattermostChannelConfigCreationRequest,
     db_session: Session = Depends(get_session),
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> MattermostChannelConfig:
@@ -156,6 +182,10 @@ def create_mattermost_channel_config(
         db_session=db_session,
         mattermost_bot_id=request.mattermost_bot_id,
         channel_id=request.channel_id,
+        channel_name=request.channel_name,
+        persona_id=request.persona_id,
+        channel_config=_form_channel_config(request),
+        is_default=request.is_default,
         is_ephemeral=request.is_ephemeral,
         enabled=request.enabled,
     )
@@ -165,17 +195,24 @@ def create_mattermost_channel_config(
 @router.patch("/admin/mattermost-app/channel/{mattermost_channel_config_id}")
 def patch_mattermost_channel_config(
     mattermost_channel_config_id: int,
-    request: MattermostChannelConfigRequest,
+    request: MattermostChannelConfigCreationRequest,
     db_session: Session = Depends(get_session),
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> MattermostChannelConfig:
-    fetch_mattermost_channel_config(db_session, mattermost_channel_config_id)
+    existing = fetch_mattermost_channel_config(
+        db_session,
+        mattermost_channel_config_id=mattermost_channel_config_id,
+    )
     fetch_mattermost_bot(db_session, request.mattermost_bot_id)
+    if existing.mattermost_bot_id != request.mattermost_bot_id:
+        raise HTTPException(status_code=400, detail="Mattermost bot ID cannot change")
     config_model = update_mattermost_channel_config(
         db_session=db_session,
         mattermost_channel_config_id=mattermost_channel_config_id,
-        mattermost_bot_id=request.mattermost_bot_id,
         channel_id=request.channel_id,
+        channel_name=request.channel_name,
+        persona_id=request.persona_id,
+        channel_config=_form_channel_config(request),
         is_ephemeral=request.is_ephemeral,
         enabled=request.enabled,
     )
@@ -192,6 +229,21 @@ def delete_mattermost_channel_config(
         db_session=db_session,
         mattermost_channel_config_id=mattermost_channel_config_id,
     )
+
+
+@router.get("/admin/mattermost-app/bots/{mattermost_bot_id}/config")
+def list_mattermost_bot_configs(
+    mattermost_bot_id: int,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> list[MattermostChannelConfig]:
+    return [
+        MattermostChannelConfig.from_model(config)
+        for config in fetch_mattermost_channel_configs(
+            db_session,
+            mattermost_bot_id=mattermost_bot_id,
+        )
+    ]
 
 
 @router.get("/admin/mattermost-app/channel")

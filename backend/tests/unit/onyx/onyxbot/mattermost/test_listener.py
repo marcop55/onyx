@@ -1,7 +1,7 @@
 """Unit tests for Mattermost listener normalization."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import cast
 
 import pytest
@@ -73,6 +73,11 @@ def _config(**overrides: object) -> MattermostListenerConfig:
             overrides,
             "owned_answer_post_message_ids",
             config.owned_answer_post_message_ids,
+        ),
+        managed_channel_config_resolver=_resolver_override(
+            overrides,
+            "managed_channel_config_resolver",
+            config.managed_channel_config_resolver,
         ),
         initial_reconnect_backoff_seconds=_float_override(
             overrides,
@@ -146,6 +151,19 @@ def _int_dict_override(
     if isinstance(value, dict):
         return cast(dict[str, int], value)
     raise TypeError(f"{key} must be a dict")
+
+
+def _resolver_override(
+    overrides: dict[str, object],
+    key: str,
+    default: Callable[[str], dict[str, object] | None] | None,
+) -> Callable[[str], dict[str, object] | None] | None:
+    value = overrides.get(key)
+    if value is None:
+        return default
+    if callable(value):
+        return cast(Callable[[str], dict[str, object] | None], value)
+    raise TypeError(f"{key} must be callable")
 
 
 def _posted_event(
@@ -342,6 +360,51 @@ def test_root_allowlisted_post_emits_normalized_event_when_enabled() -> None:
     assert event is not None
     assert event.event_type == MattermostNormalizedEventType.ROOT_ALLOWLISTED_POST
     assert event.session_key == "mattermost:channel:team_1:channel_2:post_root_2"
+
+
+def test_managed_respond_tag_only_false_allows_root_posts_at_runtime() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            root_post_channel_ids=frozenset(),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": False,
+                "disabled": False,
+            },
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_managed_root",
+            message="summarize this",
+            channel_id="channel_1",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.ROOT_ALLOWLISTED_POST
+
+
+def test_managed_respond_tag_only_true_suppresses_unmentioned_root_posts() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            root_post_channel_ids=frozenset({"channel_1"}),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_managed_root",
+            message="summarize this",
+            channel_id="channel_1",
+        )
+    )
+
+    assert event is None
 
 
 def test_thread_reply_followup_emits_normalized_event_for_owned_thread() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.handler import (
     MATTERMOST_FAILURE_MESSAGE,
     MattermostHandlerConfig,
+    _build_mattermost_context,
     _save_mattermost_attachments,
     format_mattermost_answer,
     handle_normalized_mattermost_event,
@@ -56,6 +58,7 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
     client.create_post = AsyncMock()
     client.create_post.return_value.id = "bot-post-1"
     client.update_post = AsyncMock()
+    client.get_thread_posts = AsyncMock(return_value=[])
     config = MattermostHandlerConfig(
         persona_id=456,
         owned_thread_root_ids=owned_thread_root_ids,
@@ -160,6 +163,125 @@ async def test_root_mention_creates_chat_with_configured_persona_and_posts_answe
 
 
 @pytest.mark.asyncio
+async def test_managed_channel_config_selects_agent_and_bounded_response_style() -> (
+    None
+):
+    db_session = MagicMock()
+    event = _event(
+        event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+        post_id="post-root-1",
+        root_post_id="post-root-1",
+        text="summarise this with sources",
+    )
+    client = MagicMock()
+    client.create_post = AsyncMock()
+    client.create_post.return_value.id = "bot-post-1"
+    client.update_post = AsyncMock()
+    client.get_thread_posts = AsyncMock(return_value=[])
+    config = MattermostHandlerConfig(
+        persona_id=456,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+    )
+    service_user = MagicMock()
+    service_user.id = UUID("00000000-0000-0000-0000-000000000456")
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            Packet(
+                placement=Placement(turn_index=0),
+                obj=AgentResponseDelta(content="Onyx answer [1]"),
+            ),
+        ]
+    )
+    channel_config = SimpleNamespace(
+        persona_id=789,
+        channel_config={"response_style": "orka_concise", "disabled": False},
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.fetch_mattermost_channel_config_for_bot_and_channel",
+            return_value=channel_config,
+        ) as mock_fetch_channel_config,
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=_target(),
+        ) as mock_get_target,
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=service_user,
+        ),
+        patch("onyx.onyxbot.mattermost.handler.get_persona_by_id") as mock_get_persona,
+        patch(
+            "onyx.onyxbot.mattermost.handler._stream_mattermost_answer_packets",
+            return_value=packets,
+        ) as mock_stream_packets,
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        mock_get_persona.return_value = MagicMock(id=456)
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=config,
+            client=client,
+            db_session=db_session,
+        )
+
+    assert handled is True
+    mock_fetch_channel_config.assert_called_once_with(
+        db_session,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+        channel_id="channel-1",
+    )
+    mock_get_target.assert_called_once_with(
+        db_session=db_session,
+        event=event,
+        persona_id=789,
+        onyx_user_id=None,
+    )
+    assert mock_stream_packets.call_args.kwargs["response_style"] == "orka_concise"
+
+
+def test_orka_concise_style_preserves_agent_ownership_citations_and_safety() -> None:
+    context = _build_mattermost_context(
+        _event(
+            event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+            post_id="post-root-1",
+            root_post_id="post-root-1",
+            text="summarise this with sources",
+        ),
+        response_style="orka_concise",
+    )
+
+    assert (
+        "selected Onyx Agent Instructions remain the only base personality source"
+        in context
+    )
+    assert "preserve citations plus safety-critical detail" in context
+    assert "system_prompt" not in context
+
+
+@pytest.mark.asyncio
 async def test_reply_continues_existing_parent_message() -> None:
     db_session = MagicMock()
     event = _event(
@@ -172,6 +294,7 @@ async def test_reply_continues_existing_parent_message() -> None:
     client.create_post = AsyncMock()
     client.create_post.return_value.id = "bot-post-1"
     client.update_post = AsyncMock()
+    client.get_thread_posts = AsyncMock(return_value=[])
     config = MattermostHandlerConfig(persona_id=456)
     service_user = MagicMock()
     service_user.id = UUID("00000000-0000-0000-0000-000000000456")

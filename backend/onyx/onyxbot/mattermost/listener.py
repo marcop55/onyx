@@ -125,7 +125,7 @@ class MattermostEventNormalizer:
                     text=stripped_text,
                 )
 
-            if not post.root_id and channel_id in self._config.root_post_channel_ids:
+            if not post.root_id and self._allows_unmentioned_root_post(channel_id):
                 return self._build_channel_event(
                     MattermostNormalizedEventType.ROOT_ALLOWLISTED_POST,
                     envelope,
@@ -297,6 +297,17 @@ class MattermostEventNormalizer:
             not self._config.approved_user_ids
             or user_id in self._config.approved_user_ids
         )
+
+    def _allows_unmentioned_root_post(self, channel_id: str) -> bool:
+        if self._config.managed_channel_config_resolver is not None:
+            channel_config = self._config.managed_channel_config_resolver(channel_id)
+            if channel_config is not None:
+                if channel_config.get("disabled") is True:
+                    return False
+                respond_tag_only = channel_config.get("respond_tag_only")
+                if respond_tag_only is not None:
+                    return respond_tag_only is False
+        return channel_id in self._config.root_post_channel_ids
 
     def _strip_bot_mention(self, text: str) -> str:
         updated_text = text

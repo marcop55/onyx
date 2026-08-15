@@ -32,16 +32,14 @@ from onyx.db.mattermost_bot import (
     complete_mattermost_answer_event,
     complete_mattermost_control_event,
     complete_mattermost_feedback_event,
+    fetch_mattermost_channel_config_for_bot_and_channel,
     get_loaded_mattermost_context_post_ids,
     get_mattermost_thread_mapping,
     record_mattermost_attachment,
     renew_mattermost_event_lease,
     tombstone_mattermost_thread_mapping,
 )
-from onyx.db.models import (
-    ChatMessage,
-    MattermostEventState,
-)
+from onyx.db.models import ChatMessage, MattermostEventState
 from onyx.db.persona import get_persona_by_id
 from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.file_store.file_store import get_default_file_store
@@ -119,6 +117,7 @@ class MattermostHandlerConfig:
     owned_answer_post_root_ids: dict[str, str] | None = None
     owned_answer_post_message_ids: dict[str, int] | None = None
     instance_id: str = "mattermost"
+    bot_user_id: str | None = None
     mutation_adapter: MattermostMutationAdapter | None = None
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
 
@@ -293,10 +292,21 @@ async def handle_normalized_mattermost_event(
         return False
 
     try:
+        channel_config = _resolve_mattermost_channel_config(
+            db_session=db_session,
+            event=event,
+            config=config,
+        )
+        if channel_config and channel_config.channel_config.get("disabled"):
+            return False
         target = get_or_create_mattermost_chat_target(
             db_session=db_session,
             event=event,
-            persona_id=config.persona_id,
+            persona_id=(
+                channel_config.persona_id
+                if channel_config and channel_config.persona_id is not None
+                else config.persona_id
+            ),
             onyx_user_id=config.onyx_user_id,
         )
         claim = claim_durable_mattermost_event(
@@ -383,6 +393,11 @@ async def handle_normalized_mattermost_event(
             ),
         )
 
+        response_style = (
+            channel_config.channel_config.get("response_style")
+            if channel_config is not None
+            else None
+        )
         delivery_mode = _resolve_delivery_mode(event=event, config=config)
         if ledger_event.delivery_mode is None:
             if not checkpoint_mattermost_delivery_mode(
@@ -476,6 +491,7 @@ async def handle_normalized_mattermost_event(
                 ),
                 renew_owner_fence=renew_owner_fence,
                 channel_filter_result=channel_filter_result,
+                response_style=response_style,
             )
 
         if post_id is None:
@@ -538,6 +554,7 @@ async def handle_normalized_mattermost_event(
                 if thread_context is not None
                 else None,
                 channel_filter_result=channel_filter_result,
+                response_style=response_style,
             ),
             db_session=db_session,
             event_id=ledger_event.id,
@@ -704,6 +721,7 @@ async def _run_ephemeral_answer(
     loaded_context_post_ids: frozenset[str],
     renew_owner_fence: Callable[[], bool],
     channel_filter_result: MattermostChannelFilterResult | None,
+    response_style: str | None,
 ) -> bool:
     packets = _checkpoint_mattermost_turn_packets(
         packets=_stream_mattermost_answer_packets(
@@ -716,6 +734,7 @@ async def _run_ephemeral_answer(
             external_idempotency_key=f"mattermost:event:{ledger_event.id}",
             thread_context=thread_context_text,
             channel_filter_result=channel_filter_result,
+            response_style=response_style,
         ),
         db_session=db_session,
         event_id=ledger_event.id,
@@ -793,6 +812,22 @@ def _record_owned_answer(
         config.owned_answer_post_message_ids[answer_post_id] = message_id
 
 
+def _resolve_mattermost_channel_config(
+    *,
+    db_session: Session,
+    event: NormalizedMattermostEvent,
+    config: MattermostHandlerConfig,
+) -> Any | None:
+    if config.bot_user_id is None:
+        return None
+    return fetch_mattermost_channel_config_for_bot_and_channel(
+        db_session,
+        instance_id=config.instance_id,
+        bot_user_id=config.bot_user_id,
+        channel_id=event.channel_id,
+    )
+
+
 def _checkpoint_mattermost_turn_packets(
     *,
     packets: Iterator[AnswerStreamPart],
@@ -830,6 +865,7 @@ def _stream_mattermost_answer_packets(
     external_idempotency_key: str,
     thread_context: str | None = None,
     channel_filter_result: MattermostChannelFilterResult | None = None,
+    response_style: str | None = None,
 ) -> Iterator[AnswerStreamPart]:
     if target.persona_id is None:
         raise ValueError("Mattermost thread mapping is missing persona")
@@ -867,6 +903,7 @@ def _stream_mattermost_answer_packets(
                 additional_context=_build_mattermost_context(
                     event,
                     thread_context=thread_context,
+                    response_style=response_style,
                 ),
                 external_idempotency_key=external_idempotency_key,
             )
@@ -910,6 +947,7 @@ def _build_mattermost_context(
     event: NormalizedMattermostEvent,
     *,
     thread_context: str | None = None,
+    response_style: str | None = None,
 ) -> str:
     base_context = (
         "The following message came from Mattermost. "
@@ -918,6 +956,14 @@ def _build_mattermost_context(
         f"Mattermost channel: {event.channel_id}\n"
         f"Mattermost thread root: {event.root_post_id}"
     )
+    if response_style == "orka_concise":
+        base_context += (
+            "\nMattermost response style control: selected Onyx Agent Instructions "
+            "remain the only base personality source. For Mattermost delivery, "
+            "be friendly and concise, lead with the answer, do not restate the "
+            "question, use short paragraphs or at most five bullets, expand only "
+            "on request, and preserve citations plus safety-critical detail."
+        )
     if thread_context is None:
         return base_context
     return base_context + "\n\n" + thread_context

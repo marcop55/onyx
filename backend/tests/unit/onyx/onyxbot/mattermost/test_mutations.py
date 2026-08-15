@@ -369,7 +369,7 @@ def test_normal_user_chat_keeps_shared_full_corpus_tool_selection(
     assert "system_admin" not in str(captured["additional_context"])
 
 
-def test_channel_filter_chat_request_uses_mattermost_channel_id_tag(
+def test_channel_filter_chat_request_keeps_response_style_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -406,6 +406,7 @@ def test_channel_filter_chat_request_uses_mattermost_channel_id_tag(
             tags=[Tag(tag_key="channel_id", tag_value="channel-id-1")],
             no_results_message="no indexed data",
         ),
+        response_style="orka_concise",
     )
     assert list(packets) == []
 
@@ -415,3 +416,4 @@ def test_channel_filter_chat_request_uses_mattermost_channel_id_tag(
         source_type=[DocumentSource.MATTERMOST],
         tags=[Tag(tag_key="channel_id", tag_value="channel-id-1")],
     )
+    assert "friendly and concise" in str(captured["additional_context"])
