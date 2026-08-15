@@ -89,6 +89,15 @@ class MattermostInteractiveClient(Protocol):
         props: dict[str, object] | None = None,
     ) -> object: ...
 
+    async def create_post(
+        self,
+        *,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> object: ...
+
 
 FeedbackCompleter = Callable[..., bool]
 MutationDispatcher = Callable[..., bool | object]
@@ -236,6 +245,7 @@ async def handle_mattermost_interactive_action(
     dispatch_mutation: MutationDispatcher | None = None,
     claim_mutation: ControlClaimer | None = None,
     complete_mutation: ControlCompleter | None = None,
+    channel_config: dict[str, object] | None = None,
 ) -> MattermostInteractiveActionResult:
     try:
         control = parse_mattermost_interactive_payload(
@@ -368,6 +378,12 @@ async def handle_mattermost_interactive_action(
             message=MATTERMOST_INTERACTIVE_REPLAY_MESSAGE,
         )
         return MattermostInteractiveActionResult.REPLAYED
+    if control.action is MattermostInteractiveAction.NEED_FOLLOWUP:
+        await _post_followup_request(
+            client=client,
+            control=control,
+            follow_up_tags=_follow_up_tags_from_config(channel_config),
+        )
     await _post_ephemeral(client=client, control=control, message=message)
     return MattermostInteractiveActionResult.COMPLETED
 
@@ -540,6 +556,36 @@ async def _post_ephemeral(
         root_id=control.root_post_id,
         message=message,
     )
+
+
+async def _post_followup_request(
+    *,
+    client: MattermostInteractiveClient,
+    control: MattermostInteractiveControl,
+    follow_up_tags: list[str],
+) -> None:
+    tags_text = " ".join(_mention_tag(tag) for tag in follow_up_tags)
+    message = "Received your request for more help."
+    if tags_text:
+        message = f"{message} Notifying {tags_text}."
+    await client.create_post(
+        channel_id=control.channel_id,
+        root_id=control.root_post_id,
+        message=message,
+    )
+
+
+def _follow_up_tags_from_config(channel_config: dict[str, object] | None) -> list[str]:
+    if channel_config is None:
+        return []
+    tags = channel_config.get("follow_up_tags")
+    if not isinstance(tags, list):
+        return []
+    return [tag for tag in tags if isinstance(tag, str) and tag]
+
+
+def _mention_tag(tag: str) -> str:
+    return tag if tag.startswith("@") else f"@{tag}"
 
 
 def _complete_feedback(

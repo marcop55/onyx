@@ -34,6 +34,7 @@ class InteractiveClient:
         self.membership_calls: list[tuple[str, str]] = []
         self.identity_calls: list[str] = []
         self.ephemeral_posts: list[dict[str, Any]] = []
+        self.posts: list[dict[str, Any]] = []
 
     async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
         self.membership_calls.append((channel_id, user_id))
@@ -47,6 +48,10 @@ class InteractiveClient:
 
     async def create_ephemeral_post(self, **kwargs: Any) -> object:
         self.ephemeral_posts.append(kwargs)
+        return object()
+
+    async def create_post(self, **kwargs: Any) -> object:
+        self.posts.append(kwargs)
         return object()
 
 
@@ -237,6 +242,34 @@ async def test_replay_does_not_duplicate_feedback_or_visible_confirmation() -> N
     assert calls != []
     assert [post["message"] for post in client.ephemeral_posts] == [
         MATTERMOST_INTERACTIVE_REPLAY_MESSAGE
+    ]
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_need_followup_consumes_managed_follow_up_tags_after_completion() -> None:
+    value = _action_value(MattermostInteractiveAction.NEED_FOLLOWUP)
+    client = InteractiveClient()
+    calls: list[object] = []
+
+    result = await handle_mattermost_interactive_action(
+        payload=_payload(value),
+        signing_secret="secret",
+        bot_user_id="bot-1",
+        client=client,
+        db_session=object(),
+        channel_config={"follow_up_tags": ["support", "urgent"]},
+        complete_feedback=lambda *_args, **kwargs: calls.append(kwargs) or True,
+    )
+
+    assert result is MattermostInteractiveActionResult.COMPLETED
+    assert calls != []
+    assert client.posts == [
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-1",
+            "message": "Received your request for more help. Notifying @support @urgent.",
+        }
     ]
 
 

@@ -10,6 +10,9 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from onyx.background.celery.tasks.mattermost_feedback import (
+    schedule_mattermost_feedback_reminder,
+)
 from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
 from onyx.configs.constants import (
@@ -684,6 +687,7 @@ async def handle_normalized_mattermost_event(
         )
         return True
 
+    answer_post_ids = stream_result.post_ids or (stream_result.post_id,)
     if not complete_mattermost_answer_event(
         db_session,
         event_id=ledger_event.id,
@@ -691,13 +695,21 @@ async def handle_normalized_mattermost_event(
         loaded_context_post_ids=(
             thread_context.post_ids if thread_context is not None else frozenset()
         ),
-        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
+        answer_post_ids=answer_post_ids,
     ):
         return False
+    schedule_mattermost_feedback_reminder(
+        instance_id=ledger_event.instance_id,
+        channel_id=event.channel_id,
+        root_post_id=event.root_post_id,
+        answer_post_id=answer_post_ids[0],
+        user_id=event.user_id,
+        event_id=ledger_event.id,
+    )
     _record_owned_answers(
         config=config,
         event=event,
-        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
+        answer_post_ids=answer_post_ids,
         message_id=stream_result.message_id,
     )
     return True

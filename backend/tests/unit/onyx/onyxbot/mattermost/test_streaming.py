@@ -828,6 +828,10 @@ async def test_handle_normalized_event_streams_and_records_parent_message(
             "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
             return_value=True,
         ) as mock_complete,
+        patch(
+            "onyx.onyxbot.mattermost.handler.schedule_mattermost_feedback_reminder",
+            create=True,
+        ) as mock_schedule_feedback_reminder,
     ):
         handled = await handle_normalized_mattermost_event(
             event=event,
@@ -846,6 +850,14 @@ async def test_handle_normalized_event_streams_and_records_parent_message(
     assert client.created_posts == [_checkpointed_placeholder_post()]
     assert client.updated_posts == [{"post_id": "bot-post-1", "message": "Onyx answer"}]
     mock_complete.assert_called_once()
+    mock_schedule_feedback_reminder.assert_called_once_with(
+        instance_id="instance-1",
+        channel_id="channel-1",
+        root_post_id="root-post-1",
+        answer_post_id="bot-post-1",
+        user_id="user-1",
+        event_id=1,
+    )
 
 
 @pytest.mark.asyncio
