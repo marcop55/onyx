@@ -2,9 +2,11 @@
 
 import asyncio
 import hashlib
+import json
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from typing import Protocol
 
 from onyx.configs.constants import QAFeedbackType
@@ -13,6 +15,7 @@ from onyx.onyxbot.mattermost.models import (
     MattermostListenerConfig,
     MattermostNormalizedEventType,
     MattermostPost,
+    MattermostUserInfo,
     NormalizedMattermostEvent,
 )
 
@@ -25,6 +28,8 @@ class MattermostEventSource(Protocol):
     def connect_events(self) -> AsyncIterator[MattermostEventEnvelope]: ...
 
     async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool: ...
+
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo: ...
 
 
 class MattermostEventNormalizer:
@@ -269,6 +274,10 @@ class MattermostEventNormalizer:
             user_id=user_id,
             text=text.strip(),
             raw_event_type=envelope.event,
+            file_ids=post.file_ids,
+            source_create_at=post.create_at,
+            source_update_at=post.update_at,
+            source_delete_at=post.delete_at,
             dedupe_key=self._dedupe_key(envelope),
         )
 
@@ -314,7 +323,16 @@ class MattermostEventNormalizer:
             )
         if envelope.post is not None:
             content_digest = hashlib.sha256(
-                envelope.post.message.encode("utf-8")
+                json.dumps(
+                    {
+                        "message": envelope.post.message,
+                        "file_ids": envelope.post.file_ids,
+                        "create_at": envelope.post.create_at,
+                        "update_at": envelope.post.update_at,
+                        "delete_at": envelope.post.delete_at,
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
             ).hexdigest()
             return f"fallback:{envelope.event}:{envelope.post.id}:{content_digest}"
         return (
@@ -365,10 +383,12 @@ class MattermostEventListener:
             try:
                 async for envelope in self._connect_events():
                     normalized_event = self._normalizer.normalize(envelope)
-                    if normalized_event is not None and await self._is_authorized_event(
-                        normalized_event
-                    ):
-                        yield normalized_event
+                    if normalized_event is not None:
+                        authorized_event = await self._authorize_and_attribute_event(
+                            normalized_event
+                        )
+                        if authorized_event is not None:
+                            yield authorized_event
                     backoff_seconds = self._config.initial_reconnect_backoff_seconds
             except asyncio.CancelledError:
                 raise
@@ -386,20 +406,32 @@ class MattermostEventListener:
         """Normalize one event. This is useful for tests and sync dispatchers."""
         return self._normalizer.normalize(envelope)
 
-    async def _is_authorized_event(self, event: NormalizedMattermostEvent) -> bool:
+    async def _authorize_and_attribute_event(
+        self, event: NormalizedMattermostEvent
+    ) -> NormalizedMattermostEvent | None:
         try:
             bot_is_member = await self._client.is_channel_member(
                 channel_id=event.channel_id,
                 user_id=self._config.bot_user_id,
             )
             if not bot_is_member:
-                return False
-            return await self._client.is_channel_member(
+                return None
+            sender_is_member = await self._client.is_channel_member(
                 channel_id=event.channel_id,
                 user_id=event.user_id,
             )
+            if not sender_is_member:
+                return None
+            user_info = await self._client.get_user_info(event.user_id)
+            return replace(
+                event,
+                source_username=str(getattr(user_info, "username", "")) or None,
+                source_display_name=(
+                    str(getattr(user_info, "display_name", "")) or None
+                ),
+            )
         except Exception:
-            return False
+            return None
 
     async def _connect_events(self) -> AsyncIterator[MattermostEventEnvelope]:
         async for envelope in self._client.connect_events():

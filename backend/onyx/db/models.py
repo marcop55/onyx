@@ -3409,6 +3409,13 @@ class MattermostEventState(Base):
         ForeignKey("mattermost_thread_mapping.id", ondelete="CASCADE"), nullable=True
     )
     source_post_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_username: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_create_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_update_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_delete_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     state: Mapped[str] = mapped_column(
         String, nullable=False, default="claimed", server_default="claimed"
     )
@@ -3430,6 +3437,49 @@ class MattermostEventState(Base):
         ForeignKey("chat_feedback.id", ondelete="SET NULL"), nullable=True
     )
     rendered_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MattermostAttachment(Base):
+    __tablename__ = "mattermost_attachment"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "mattermost_file_id",
+            name="uq_mattermost_attachment_event_file",
+        ),
+        Index("ix_mattermost_attachment_event_id", "event_id"),
+        Index("ix_mattermost_attachment_file_id", "mattermost_file_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("mattermost_event_state.id", ondelete="CASCADE"), nullable=False
+    )
+    mattermost_file_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_post_id: Mapped[str] = mapped_column(String, nullable=False)
+    uploader_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String, nullable=False)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    create_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    file_store_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    user_file_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("user_file.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    promoted_seafile_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    promoted_seafile_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    promoted_seafile_revision: Mapped[str | None] = mapped_column(String, nullable=True)
     time_created: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

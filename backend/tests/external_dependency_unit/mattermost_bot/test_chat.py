@@ -15,13 +15,16 @@ from onyx.context.search.models import SearchDoc
 from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
 from onyx.db.models import MattermostEventState, User
 from onyx.db.users import get_or_create_mattermost_service_account
+from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.handler import (
     MATTERMOST_FAILURE_MESSAGE,
     MattermostHandlerConfig,
+    _save_mattermost_attachments,
     format_mattermost_answer,
     handle_normalized_mattermost_event,
 )
 from onyx.onyxbot.mattermost.models import (
+    MattermostFileInfo,
     MattermostNormalizedEventType,
     NormalizedMattermostEvent,
 )
@@ -238,6 +241,286 @@ async def test_reply_continues_existing_parent_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_file_ids_are_saved_as_turn_attachments() -> None:
+    db_session = MagicMock()
+    db_session.scalar.return_value = None
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+        session_key="mattermost:channel:team-1:channel-1:post-root-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="post-root-1",
+        root_post_id="post-root-1",
+        user_id="user-1",
+        text="summarize this",
+        raw_event_type="posted",
+        file_ids=("mm-file-1",),
+        dedupe_key="event_id:post-root-1",
+    )
+    client = MagicMock()
+    client.get_file_info = AsyncMock(
+        return_value=MattermostFileInfo(
+            id="mm-file-1",
+            uploader_user_id="user-2",
+            post_id="post-root-1",
+            filename="brief.txt",
+            mime_type="text/plain",
+            size_bytes=11,
+            create_at=1786720000123,
+        )
+    )
+    client.download_file = AsyncMock(return_value=b"hello world")
+    file_store = MagicMock()
+    file_store.save_file.return_value = "stored-file-1"
+    ledger_event = MattermostEventState(
+        id=1,
+        instance_id="default",
+        channel_id="channel-1",
+        dedupe_key="event_id:post-root-1",
+        event_type="channel_mention",
+        source_post_id="post-root-1",
+        mattermost_pending_post_id="pending-1",
+        state="pending",
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_default_file_store",
+            return_value=file_store,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.record_mattermost_attachment",
+        ) as mock_record_attachment,
+    ):
+        file_descriptors = await _save_mattermost_attachments(
+            client=client,
+            db_session=db_session,
+            event=event,
+            ledger_event=ledger_event,
+            service_user_id=UUID("00000000-0000-0000-0000-000000000456"),
+        )
+
+    assert file_descriptors == [
+        {
+            "id": "stored-file-1",
+            "type": "plain_text",
+            "name": "brief.txt",
+            "user_file_id": str(db_session.add.call_args.args[0].id),
+        }
+    ]
+    client.get_file_info.assert_awaited_once_with("mm-file-1")
+    client.download_file.assert_awaited_once_with("mm-file-1")
+    file_store.save_file.assert_called_once()
+    mock_record_attachment.assert_called_once()
+    assert mock_record_attachment.call_args.kwargs["sha256"] == (
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    )
+    assert "promoted_seafile_path" not in mock_record_attachment.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_file_only_owned_thread_post_is_audited_and_ingests_attachments() -> None:
+    db_session = MagicMock()
+    db_session.scalar.return_value = None
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.THREAD_REPLY_FOLLOWUP,
+        session_key="mattermost:channel:team-1:channel-1:post-root-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="post-file-only-1",
+        root_post_id="post-root-1",
+        user_id="user-1",
+        text="   ",
+        raw_event_type="posted",
+        file_ids=("mm-file-1",),
+        dedupe_key="event_id:file-only-1",
+    )
+    client = MagicMock()
+    client.get_file_info = AsyncMock(
+        return_value=MattermostFileInfo(
+            id="mm-file-1",
+            uploader_user_id="user-1",
+            post_id="post-file-only-1",
+            filename="only-file.txt",
+            mime_type="text/plain",
+            size_bytes=7,
+        )
+    )
+    client.download_file = AsyncMock(return_value=b"content")
+    client.create_post = AsyncMock()
+    client.update_post = AsyncMock()
+    file_store = MagicMock()
+    file_store.save_file.return_value = "stored-file-only-1"
+    service_user = MagicMock()
+    service_user.id = UUID("00000000-0000-0000-0000-000000000456")
+    target = _target()
+    target.mapping.id = 7
+    claim = _processing_claim()
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ) as mock_get_target,
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=claim,
+        ) as mock_claim,
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=service_user,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_default_file_store",
+            return_value=file_store,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.record_mattermost_attachment",
+        ) as mock_record_attachment,
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_control_event",
+            return_value=True,
+        ) as mock_complete,
+        patch(
+            "onyx.onyxbot.mattermost.handler.handle_stream_message_objects"
+        ) as mock_handle_stream,
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=db_session,
+        )
+
+    assert handled is True
+    mock_get_target.assert_called_once()
+    mock_claim.assert_called_once()
+    client.get_file_info.assert_awaited_once_with("mm-file-1")
+    client.download_file.assert_awaited_once_with("mm-file-1")
+    mock_record_attachment.assert_called_once()
+    mock_complete.assert_called_once_with(
+        db_session,
+        event_id=claim.event.id,
+        claim_owner=claim.claim_owner,
+    )
+    mock_handle_stream.assert_not_called()
+    client.create_post.assert_not_awaited()
+    client.update_post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attachment_metadata_for_another_post_fails_before_content_read() -> None:
+    db_session = MagicMock()
+    db_session.scalar.return_value = None
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+        session_key="mattermost:channel:team-1:channel-1:post-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="post-1",
+        root_post_id="post-1",
+        user_id="user-1",
+        text="summarize this",
+        raw_event_type="posted",
+        file_ids=("file-from-another-post",),
+        dedupe_key="event_id:post-1",
+    )
+    client = MagicMock()
+    client.get_file_info = AsyncMock(
+        return_value=MattermostFileInfo(
+            id="file-from-another-post",
+            uploader_user_id="user-2",
+            post_id="post-in-another-channel",
+            filename="private.txt",
+            mime_type="text/plain",
+        )
+    )
+    client.download_file = AsyncMock(return_value=b"must not be read")
+    ledger_event = MattermostEventState(
+        id=2,
+        instance_id="default",
+        channel_id="channel-1",
+        dedupe_key="event_id:post-1",
+        event_type="channel_mention",
+        source_post_id="post-1",
+        mattermost_pending_post_id="pending-2",
+        state="claimed",
+    )
+
+    with pytest.raises(MattermostClientError, match="does not belong to source post"):
+        await _save_mattermost_attachments(
+            client=client,
+            db_session=db_session,
+            event=event,
+            ledger_event=ledger_event,
+            service_user_id=UUID("00000000-0000-0000-0000-000000000456"),
+        )
+
+    client.download_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attachment_storage_identity_is_stable_across_replay() -> None:
+    db_session = MagicMock()
+    db_session.scalar.return_value = None
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+        session_key="mattermost:channel:team-1:channel-1:post-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="post-1",
+        root_post_id="post-1",
+        user_id="user-1",
+        text="summarize",
+        raw_event_type="posted",
+        file_ids=("file-1",),
+        dedupe_key="event_id:post-1",
+    )
+    client = MagicMock()
+    client.get_file_info = AsyncMock(
+        return_value=MattermostFileInfo(
+            id="file-1",
+            uploader_user_id="user-1",
+            post_id="post-1",
+            filename="same-name.txt",
+            mime_type="text/plain",
+        )
+    )
+    client.download_file = AsyncMock(return_value=b"stable")
+    file_store = MagicMock()
+    file_store.save_file.return_value = "stable-storage-id"
+    ledger_event = MattermostEventState(
+        id=3,
+        instance_id="instance-1",
+        channel_id="channel-1",
+        dedupe_key="event_id:post-1",
+        event_type="channel_mention",
+        source_post_id="post-1",
+        mattermost_pending_post_id="pending-3",
+        state="claimed",
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_default_file_store",
+            return_value=file_store,
+        ),
+        patch("onyx.onyxbot.mattermost.handler.record_mattermost_attachment"),
+    ):
+        await _save_mattermost_attachments(
+            client=client,
+            db_session=db_session,
+            event=event,
+            ledger_event=ledger_event,
+            service_user_id=UUID("00000000-0000-0000-0000-000000000456"),
+        )
+
+    assert file_store.save_file.call_args.kwargs["file_id"] == (
+        "mattermost/instance-1/channel-1/file-1"
+    )
+
+
+@pytest.mark.asyncio
 async def test_failure_posts_safe_thread_message() -> None:
     db_session = MagicMock()
     event = _event(
@@ -287,12 +570,40 @@ async def test_root_deletion_relinquishes_owned_thread_without_deleting_history(
         root_post_id="post-root-1",
         text="",
     )
-    mapping = MagicMock(answer_post_message_ids={"bot-post-1": 22})
+    mapping = MagicMock(id=7, answer_post_message_ids={"bot-post-1": 22})
+    ledger_event = MattermostEventState(
+        id=91,
+        instance_id="mattermost",
+        channel_id="channel-1",
+        dedupe_key=event.dedupe_key,
+        event_type="post_delete_tombstone",
+        mapping_id=7,
+        source_post_id="post-root-1",
+        mattermost_pending_post_id="pending-delete",
+        state="claimed",
+    )
+    claim_owner = UUID("00000000-0000-0000-0000-000000000091")
 
-    with patch(
-        "onyx.onyxbot.mattermost.handler.tombstone_mattermost_thread_mapping",
-        return_value=mapping,
-    ) as mock_tombstone:
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_mattermost_thread_mapping",
+            return_value=mapping,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=MattermostEventClaim(
+                MattermostClaimOutcome.PROCESS, ledger_event, claim_owner
+            ),
+        ) as mock_claim,
+        patch(
+            "onyx.onyxbot.mattermost.handler.tombstone_mattermost_thread_mapping",
+            return_value=mapping,
+        ) as mock_tombstone,
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_control_event",
+            return_value=True,
+        ) as mock_complete,
+    ):
         handled = await handle_normalized_mattermost_event(
             event=event,
             config=config,
@@ -310,6 +621,12 @@ async def test_root_deletion_relinquishes_owned_thread_without_deleting_history(
     assert config.owned_thread_root_ids == set()
     assert config.owned_answer_post_root_ids == {}
     assert config.owned_answer_post_message_ids == {}
+    assert mock_claim.call_args.kwargs["source_delete_at"] == event.source_delete_at
+    mock_complete.assert_called_once_with(
+        db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+    )
     client.create_post.assert_not_called()
 
 

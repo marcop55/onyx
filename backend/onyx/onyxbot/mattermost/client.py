@@ -10,8 +10,10 @@ import aiohttp
 
 from onyx.onyxbot.mattermost.models import (
     MattermostEventEnvelope,
+    MattermostFileInfo,
     MattermostPost,
     MattermostReaction,
+    MattermostUserInfo,
 )
 
 
@@ -175,6 +177,20 @@ class MattermostClient:
             and payload.get("user_id") == user_id
         )
 
+    async def get_file_info(self, file_id: str) -> MattermostFileInfo:
+        """Return Mattermost metadata for one bot-authorized file."""
+        response = await self._request_json("GET", f"/api/v4/files/{file_id}/info")
+        return _file_info_from_mapping(cast(Mapping[object, object], response))
+
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo:
+        """Return the authoritative Mattermost identity for one user."""
+        response = await self._request_json("GET", f"/api/v4/users/{user_id}")
+        return _user_info_from_mapping(cast(Mapping[object, object], response))
+
+    async def download_file(self, file_id: str) -> bytes:
+        """Return Mattermost file bytes using the bot token."""
+        return await self._request_bytes("GET", f"/api/v4/files/{file_id}")
+
     async def connect_events(self) -> AsyncIterator[MattermostEventEnvelope]:
         """Connect to Mattermost WebSocket events and yield event envelopes."""
         session = self._require_session()
@@ -236,6 +252,23 @@ class MattermostClient:
                 ) from exc
 
         raise RuntimeError("Mattermost rate-limit retry loop exhausted unexpectedly")
+
+    async def _request_bytes(self, method: str, path: str) -> bytes:
+        session = self._require_session()
+        try:
+            async with session.request(
+                method,
+                f"{self._base_url}{path}",
+                headers=self._headers,
+            ) as response:
+                if response.status >= 400:
+                    text = await response.text()
+                    raise MattermostResponseError(text, response.status)
+                return await response.read()
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise MattermostClientError(
+                f"Mattermost {method} transport failed"
+            ) from exc
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
@@ -322,6 +355,10 @@ def _post_from_mapping(mapping: Mapping[object, object]) -> MattermostPost:
         user_id=_string_value(mapping.get("user_id")),
         channel_id=_string_value(mapping.get("channel_id")),
         pending_post_id=_string_value(mapping.get("pending_post_id")),
+        file_ids=_string_tuple_value(mapping.get("file_ids")),
+        create_at=_int_value(mapping.get("create_at")),
+        update_at=_int_value(mapping.get("update_at")),
+        delete_at=_int_value(mapping.get("delete_at")),
         props=_props_value(mapping.get("props")),
     )
 
@@ -350,6 +387,36 @@ def _reaction_from_payload(value: object) -> MattermostReaction | None:
     )
 
 
+def _file_info_from_mapping(mapping: Mapping[object, object]) -> MattermostFileInfo:
+    return MattermostFileInfo(
+        id=_string_value(mapping.get("id")),
+        uploader_user_id=_string_value(mapping.get("user_id")),
+        post_id=_string_value(mapping.get("post_id")),
+        filename=_string_value(mapping.get("name")),
+        mime_type=_string_value(mapping.get("mime_type")),
+        size_bytes=_int_value(mapping.get("size")),
+        create_at=_int_value(mapping.get("create_at")),
+    )
+
+
+def _user_info_from_mapping(mapping: Mapping[object, object]) -> MattermostUserInfo:
+    username = _string_value(mapping.get("username"))
+    full_name = " ".join(
+        value
+        for value in (
+            _string_value(mapping.get("first_name")),
+            _string_value(mapping.get("last_name")),
+        )
+        if value
+    )
+    display_name = full_name or _string_value(mapping.get("nickname")) or username
+    return MattermostUserInfo(
+        id=_string_value(mapping.get("id")),
+        username=username,
+        display_name=display_name,
+    )
+
+
 def _props_value(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
@@ -366,6 +433,18 @@ def _string_value(value: object) -> str:
     if isinstance(value, str):
         return value
     return ""
+
+
+def _string_tuple_value(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def _int_value(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    return None
 
 
 def _first_present_string(*values: object) -> str:

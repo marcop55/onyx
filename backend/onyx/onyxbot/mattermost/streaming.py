@@ -9,7 +9,11 @@ from typing import Protocol
 from onyx.chat.models import AnswerStreamPart, ChatBasicResponse, StreamingError
 from onyx.context.search.models import SearchDoc
 from onyx.onyxbot.mattermost.formatting import format_mattermost_answer
-from onyx.onyxbot.mattermost.models import MattermostPost
+from onyx.onyxbot.mattermost.models import (
+    MattermostFileInfo,
+    MattermostPost,
+    MattermostUserInfo,
+)
 from onyx.server.query_and_chat.models import MessageResponseIDInfo
 from onyx.server.query_and_chat.streaming_models import (
     AgentResponseDelta,
@@ -53,6 +57,12 @@ class MattermostStreamingClient(Protocol):
     ) -> MattermostPost | None: ...
 
     async def update_post(self, *, post_id: str, message: str) -> MattermostPost: ...
+
+    async def get_file_info(self, file_id: str) -> MattermostFileInfo: ...
+
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo: ...
+
+    async def download_file(self, file_id: str) -> bytes: ...
 
 
 @dataclass(frozen=True)
