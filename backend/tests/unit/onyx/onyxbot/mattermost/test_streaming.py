@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -672,6 +673,119 @@ async def test_ambiguous_post_replay_never_issues_second_post_after_search_miss(
     assert len(client.reconciliation_requests) == 1
     assert client.created_posts == []
     assert client.updated_posts == []
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_typed_mutation_attaches_confirmation_button() -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+    from onyx.onyxbot.mattermost.mutations import MATTERMOST_MUTATION_COMMAND_PREFIX
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    command = (
+        MATTERMOST_MUTATION_COMMAND_PREFIX
+        + '{"action":"update","repo_id":"repo-1","path":"/automation/note.md",'
+        '"expected_revision":"rev-1","content":"new content",'
+        '"destination_path":null,"confirmed":false,"scope_prefix":"/automation"}'
+    )
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    event = NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.DIRECT_MESSAGE,
+        session_key="mattermost:dm:team-1:channel-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text=command,
+        dedupe_key="event_id:root-post-1",
+    )
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(
+                AgentResponseDelta(content="Review and confirm this admin action.")
+            ),
+        ]
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_persona_by_id",
+            return_value=MagicMock(id=456),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.handle_stream_message_objects",
+            return_value=packets,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(
+                persona_id=456,
+                mutation_adapter=cast(Any, object()),
+                interactive_signing_secret="secret",
+                interactive_url="http://127.0.0.1:8091/interactive",
+            ),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    actions = cast(
+        list[dict[str, object]],
+        cast(
+            list[dict[str, object]],
+            cast(dict[str, object], client.updated_posts[0]["props"])["attachments"],
+        )[0]["actions"],
+    )
+    confirm_actions = [
+        action for action in actions if action["id"] == "confirm_mutation"
+    ]
+    assert len(confirm_actions) == 1
+    assert cast(dict[str, object], confirm_actions[0]["integration"])["url"] == (
+        "http://127.0.0.1:8091/interactive"
+    )
 
 
 class _RecordingClient:

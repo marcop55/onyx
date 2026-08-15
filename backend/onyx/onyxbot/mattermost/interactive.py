@@ -92,11 +92,14 @@ class MattermostInteractiveClient(Protocol):
 
 FeedbackCompleter = Callable[..., bool]
 MutationDispatcher = Callable[..., bool | object]
+ControlClaimer = Callable[..., tuple[int, Any] | None]
+ControlCompleter = Callable[..., bool]
 
 
 def build_mattermost_answer_action_props(
     *,
     signing_secret: str,
+    interactive_url: str | None = None,
     channel_id: str,
     root_post_id: str,
     answer_post_id: str,
@@ -113,6 +116,7 @@ def build_mattermost_answer_action_props(
             "Helpful",
             MattermostInteractiveAction.LIKE,
             signing_secret=signing_secret,
+            interactive_url=interactive_url,
             team_id=team_id,
             channel_id=channel_id,
             root_post_id=root_post_id,
@@ -125,6 +129,7 @@ def build_mattermost_answer_action_props(
             "Not helpful",
             MattermostInteractiveAction.DISLIKE,
             signing_secret=signing_secret,
+            interactive_url=interactive_url,
             team_id=team_id,
             channel_id=channel_id,
             root_post_id=root_post_id,
@@ -137,6 +142,7 @@ def build_mattermost_answer_action_props(
             "Need follow-up",
             MattermostInteractiveAction.NEED_FOLLOWUP,
             signing_secret=signing_secret,
+            interactive_url=interactive_url,
             team_id=team_id,
             channel_id=channel_id,
             root_post_id=root_post_id,
@@ -149,6 +155,7 @@ def build_mattermost_answer_action_props(
             "Resolved",
             MattermostInteractiveAction.RESOLVED,
             signing_secret=signing_secret,
+            interactive_url=interactive_url,
             team_id=team_id,
             channel_id=channel_id,
             root_post_id=root_post_id,
@@ -161,6 +168,7 @@ def build_mattermost_answer_action_props(
             "View sources",
             MattermostInteractiveAction.VIEW_SOURCES,
             signing_secret=signing_secret,
+            interactive_url=interactive_url,
             team_id=team_id,
             channel_id=channel_id,
             root_post_id=root_post_id,
@@ -176,6 +184,7 @@ def build_mattermost_answer_action_props(
                 "Confirm admin action",
                 MattermostInteractiveAction.CONFIRM_MUTATION,
                 signing_secret=signing_secret,
+                interactive_url=interactive_url,
                 team_id=team_id,
                 channel_id=channel_id,
                 root_post_id=root_post_id,
@@ -225,6 +234,8 @@ async def handle_mattermost_interactive_action(
     instance_id: str = "mattermost",
     complete_feedback: FeedbackCompleter | None = None,
     dispatch_mutation: MutationDispatcher | None = None,
+    claim_mutation: ControlClaimer | None = None,
+    complete_mutation: ControlCompleter | None = None,
 ) -> MattermostInteractiveActionResult:
     try:
         control = parse_mattermost_interactive_payload(
@@ -257,6 +268,28 @@ async def handle_mattermost_interactive_action(
             return MattermostInteractiveActionResult.UNAUTHORIZED
         if control.mutation_command is None or dispatch_mutation is None:
             return MattermostInteractiveActionResult.REJECTED
+        claim_mutation = claim_mutation or _claim_control_for_action
+        complete_mutation = complete_mutation or _complete_claimed_control
+        claim = claim_mutation(db_session, instance_id=instance_id, control=control)
+        if claim is None:
+            await _post_ephemeral(
+                client=client,
+                control=control,
+                message=MATTERMOST_INTERACTIVE_REPLAY_MESSAGE,
+            )
+            return MattermostInteractiveActionResult.REPLAYED
+        claim_event_id, claim_owner = claim
+        if not complete_mutation(
+            db_session,
+            event_id=claim_event_id,
+            claim_owner=claim_owner,
+        ):
+            await _post_ephemeral(
+                client=client,
+                control=control,
+                message=MATTERMOST_INTERACTIVE_REPLAY_MESSAGE,
+            )
+            return MattermostInteractiveActionResult.REPLAYED
         event = NormalizedMattermostEvent(
             event_type=MattermostNormalizedEventType.SLASH_COMMAND,
             session_key=f"mattermost:interactive:{control.team_id}:{control.channel_id}:{control.root_post_id}",
@@ -344,6 +377,7 @@ def _button(
     action: MattermostInteractiveAction,
     *,
     signing_secret: str,
+    interactive_url: str | None,
     team_id: str,
     channel_id: str,
     root_post_id: str,
@@ -353,7 +387,7 @@ def _button(
     sources: tuple[str, ...],
     mutation_command: str | None = None,
 ) -> dict[str, object]:
-    return {
+    button: dict[str, object] = {
         "id": action.value,
         "name": name,
         "type": "button",
@@ -374,6 +408,9 @@ def _button(
             )
         },
     }
+    if interactive_url is not None:
+        button["integration"] = {"url": interactive_url}
+    return button
 
 
 def _signed_value(payload: dict[str, object], signing_secret: str) -> str:
@@ -574,6 +611,32 @@ def _claim_control(
     if claim.outcome is not MattermostClaimOutcome.PROCESS or claim.claim_owner is None:
         return None
     return claim.event.id, claim.claim_owner
+
+
+def _claim_control_for_action(
+    db_session: Session | object,
+    *,
+    instance_id: str,
+    control: MattermostInteractiveControl,
+) -> tuple[int, Any] | None:
+    if not isinstance(db_session, Session):
+        return 0, None
+    return _claim_control(db_session, instance_id=instance_id, control=control)
+
+
+def _complete_claimed_control(
+    db_session: Session | object,
+    *,
+    event_id: int,
+    claim_owner: Any,
+) -> bool:
+    if not isinstance(db_session, Session):
+        return True
+    return complete_mattermost_control_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+    )
 
 
 def _required_string(mapping: dict[str, object], key: str) -> str:

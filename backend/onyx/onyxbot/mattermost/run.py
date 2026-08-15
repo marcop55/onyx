@@ -278,7 +278,14 @@ def _build_handler_config(
         owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
         ephemeral_response_channel_ids=ephemeral_response_channel_ids,
         interactive_signing_secret=config.token,
+        interactive_url=_interactive_action_url(config),
     )
+
+
+def _interactive_action_url(config: MattermostBotConfig) -> str:
+    host = getattr(config, "host", "127.0.0.1")
+    port = getattr(config, "port", 8091)
+    return f"http://{host}:{port}/interactive"
 
 
 def main() -> None:

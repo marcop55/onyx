@@ -65,6 +65,7 @@ from onyx.onyxbot.mattermost.mutations import (
     MATTERMOST_MUTATION_UNAVAILABLE_MESSAGE,
     MattermostMutationAdapter,
     MattermostMutationPermissionError,
+    build_mattermost_confirmed_mutation_command,
     parse_mattermost_mutation_command,
 )
 from onyx.onyxbot.mattermost.session import (
@@ -111,6 +112,7 @@ class MattermostHandlerConfig:
     mutation_adapter: MattermostMutationAdapter | None = None
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
     interactive_signing_secret: str | None = None
+    interactive_url: str | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -167,12 +169,14 @@ async def handle_normalized_mattermost_event(
     Returns False for events that do not route to Onyx chat.
     """
 
-    if await dispatch_mattermost_mutation(
-        event=event,
-        client=client,
-        adapter=config.mutation_adapter,
-    ):
-        return True
+    confirmed_mutation_command = build_mattermost_confirmed_mutation_command(event.text)
+    if confirmed_mutation_command is None:
+        if await dispatch_mattermost_mutation(
+            event=event,
+            client=client,
+            adapter=config.mutation_adapter,
+        ):
+            return True
 
     if event.event_type == MattermostNormalizedEventType.POST_DELETE_TOMBSTONE:
         mapping = get_mattermost_thread_mapping(
@@ -541,6 +545,7 @@ async def handle_normalized_mattermost_event(
                 config=config,
                 event=event,
                 post_id=post_id,
+                mutation_command=confirmed_mutation_command,
             ),
         )
     except MattermostThreadTombstonedError:
@@ -884,6 +889,7 @@ def _build_final_action_props_factory(
     config: MattermostHandlerConfig,
     event: NormalizedMattermostEvent,
     post_id: str,
+    mutation_command: str | None = None,
 ) -> Callable[[int, str], dict[str, object] | None] | None:
     if config.interactive_signing_secret is None:
         return None
@@ -894,6 +900,7 @@ def _build_final_action_props_factory(
     ) -> dict[str, object] | None:
         return build_mattermost_answer_action_props(
             signing_secret=config.interactive_signing_secret or "",
+            interactive_url=config.interactive_url,
             team_id=event.team_id,
             channel_id=event.channel_id,
             root_post_id=event.root_post_id,
@@ -901,6 +908,9 @@ def _build_final_action_props_factory(
             answer_message_id=message_id,
             requester_user_id=event.user_id,
             sources=_extract_source_lines(final_message),
+            mutation_command=mutation_command
+            if config.mutation_adapter is not None
+            else None,
         )
 
     return final_action_props

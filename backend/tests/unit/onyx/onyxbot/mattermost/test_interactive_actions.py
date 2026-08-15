@@ -108,6 +108,27 @@ def test_signed_control_values_are_identity_bound_and_tamper_evident() -> None:
         )
 
 
+def test_answer_action_buttons_are_wired_to_interactive_endpoint() -> None:
+    props = build_mattermost_answer_action_props(
+        signing_secret="secret",
+        interactive_url="http://127.0.0.1:8091/interactive",
+        channel_id="channel-1",
+        root_post_id="root-1",
+        answer_post_id="answer-post-1",
+        answer_message_id=42,
+        requester_user_id="user-1",
+    )
+    attachments = cast(list[dict[str, object]], props["attachments"])
+    actions = cast(list[dict[str, object]], attachments[0]["actions"])
+
+    assert actions != []
+    assert all(
+        cast(dict[str, object], action["integration"])["url"]
+        == "http://127.0.0.1:8091/interactive"
+        for action in actions
+    )
+
+
 @pytest.mark.asyncio
 async def test_feedback_action_rechecks_membership_and_completes_once() -> None:
     value = _action_value(MattermostInteractiveAction.LIKE)
@@ -248,3 +269,55 @@ async def test_confirm_mutation_requires_current_system_admin_then_dispatches_co
     event = cast(Any, mutation_calls[0]["event"])
     assert event.text == '@onyx-mutate {"confirmed":true}'
     assert event.user_id == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_confirm_mutation_replay_does_not_duplicate_gateway_dispatch() -> None:
+    value = _action_value(MattermostInteractiveAction.CONFIRM_MUTATION)
+    client = InteractiveClient(
+        memberships=[True, True, True, True],
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        ),
+    )
+    claims = iter([(1, "owner-1"), None])
+    completed_claims: list[object] = []
+    mutation_calls: list[dict[str, object]] = []
+
+    def claim_mutation(*_args: object, **_kwargs: object) -> tuple[int, object] | None:
+        return next(claims)
+
+    def complete_mutation(
+        _db_session: object,
+        *,
+        event_id: int,
+        claim_owner: object,
+    ) -> bool:
+        completed_claims.append((event_id, claim_owner))
+        return True
+
+    for expected in (
+        MattermostInteractiveActionResult.COMPLETED,
+        MattermostInteractiveActionResult.REPLAYED,
+    ):
+        result = await handle_mattermost_interactive_action(
+            payload=_payload(value),
+            signing_secret="secret",
+            bot_user_id="bot-1",
+            client=client,
+            db_session=object(),
+            dispatch_mutation=lambda **kwargs: mutation_calls.append(kwargs) or True,
+            claim_mutation=claim_mutation,
+            complete_mutation=complete_mutation,
+        )
+
+        assert result is expected
+
+    assert len(mutation_calls) == 1
+    assert completed_claims == [(1, "owner-1")]
+    assert [post["message"] for post in client.ephemeral_posts] == [
+        MATTERMOST_INTERACTIVE_REPLAY_MESSAGE
+    ]
