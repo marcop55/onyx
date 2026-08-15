@@ -48,6 +48,16 @@ class MattermostStreamingClient(Protocol):
         props: dict[str, object] | None = None,
     ) -> MattermostPost: ...
 
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost: ...
+
     async def find_post_by_idempotency_fields(
         self,
         *,
@@ -183,6 +193,129 @@ async def stream_mattermost_answer(
         message_id=message_id,
         post_id=post_id,
     )
+
+
+async def stream_mattermost_ephemeral_answer(
+    *,
+    client: MattermostStreamingClient,
+    user_id: str,
+    channel_id: str,
+    root_id: str,
+    packets: Iterator[AnswerStreamPart],
+    checkpoint_final: Callable[[str, int], None] | None = None,
+    before_external_update: Callable[[], bool] | None = None,
+    before_ephemeral_delivery: Callable[[], bool] | None = None,
+    after_ephemeral_delivery: Callable[[str], bool] | None = None,
+    props: dict[str, object] | None = None,
+) -> MattermostStreamResult:
+    """Render one Onyx answer and send it as a Mattermost ephemeral post."""
+
+    answer = ""
+    citations: list[CitationInfo] = []
+    top_documents: list[SearchDoc] = []
+    message_id: int | None = None
+
+    try:
+        for packet in packets:
+            if isinstance(packet, MessageResponseIDInfo):
+                message_id = packet.reserved_assistant_message_id
+                continue
+            if isinstance(packet, StreamingError):
+                raise RuntimeError(packet.error)
+            if isinstance(packet, ChatBasicResponse):
+                answer = packet.answer
+                top_documents = packet.top_documents
+                citations = packet.citation_info
+                message_id = packet.message_id
+                continue
+            if not isinstance(packet, Packet):
+                continue
+            if isinstance(packet.obj, AgentResponseStart):
+                if packet.obj.final_documents:
+                    top_documents = packet.obj.final_documents
+            elif isinstance(packet.obj, AgentResponseDelta):
+                answer += packet.obj.content
+            elif isinstance(packet.obj, CitationInfo):
+                citations.append(packet.obj)
+    except Exception as exc:
+        await _deliver_ephemeral_once(
+            client=client,
+            user_id=user_id,
+            channel_id=channel_id,
+            root_id=root_id,
+            message=_format_failure_message(answer),
+            before_external_update=before_external_update,
+            before_ephemeral_delivery=before_ephemeral_delivery,
+            after_ephemeral_delivery=after_ephemeral_delivery,
+            props=props,
+        )
+        raise MattermostStreamVisibleError(str(exc)) from exc
+
+    if message_id is None:
+        await _deliver_ephemeral_once(
+            client=client,
+            user_id=user_id,
+            channel_id=channel_id,
+            root_id=root_id,
+            message=_format_failure_message(answer),
+            before_external_update=before_external_update,
+            before_ephemeral_delivery=before_ephemeral_delivery,
+            after_ephemeral_delivery=after_ephemeral_delivery,
+            props=props,
+        )
+        raise MattermostStreamVisibleError("Message ID is required")
+
+    final_message = format_mattermost_answer(
+        ChatBasicResponse(
+            answer=answer,
+            answer_citationless=answer,
+            top_documents=top_documents,
+            error_msg=None,
+            message_id=message_id,
+            citation_info=citations,
+        )
+    )
+    if checkpoint_final is not None:
+        checkpoint_final(final_message, message_id)
+    post = await _deliver_ephemeral_once(
+        client=client,
+        user_id=user_id,
+        channel_id=channel_id,
+        root_id=root_id,
+        message=final_message,
+        before_external_update=before_external_update,
+        before_ephemeral_delivery=before_ephemeral_delivery,
+        after_ephemeral_delivery=after_ephemeral_delivery,
+        props=props,
+    )
+    return MattermostStreamResult(message_id=message_id, post_id=post.id)
+
+
+async def _deliver_ephemeral_once(
+    *,
+    client: MattermostStreamingClient,
+    user_id: str,
+    channel_id: str,
+    root_id: str,
+    message: str,
+    before_external_update: Callable[[], bool] | None,
+    before_ephemeral_delivery: Callable[[], bool] | None,
+    after_ephemeral_delivery: Callable[[str], bool] | None,
+    props: dict[str, object] | None,
+) -> MattermostPost:
+    _require_owner_fence(before_external_update)
+    if before_ephemeral_delivery is not None and not before_ephemeral_delivery():
+        raise MattermostLeaseLostError("Mattermost event lease was lost")
+    post = await client.create_ephemeral_post(
+        user_id=user_id,
+        channel_id=channel_id,
+        root_id=root_id,
+        message=message,
+        props=props,
+    )
+    if after_ephemeral_delivery is not None and not after_ephemeral_delivery(post.id):
+        raise MattermostLeaseLostError("Mattermost event lease was lost")
+    return post
 
 
 def _require_owner_fence(before_external_update: Callable[[], bool] | None) -> None:

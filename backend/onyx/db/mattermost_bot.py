@@ -2,6 +2,7 @@ import datetime
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
@@ -14,11 +15,16 @@ from onyx.db.models import (
     ChatSession,
     MattermostAttachment,
     MattermostBot,
+    MattermostChannelConfig,
     MattermostEventState,
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
 )
-from onyx.onyxbot.mattermost.models import MattermostListenerConfig
+from onyx.onyxbot.mattermost.models import (
+    MattermostDeliveryTerminalOutcome,
+    MattermostListenerConfig,
+    MattermostResponseDeliveryMode,
+)
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
 MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
@@ -102,6 +108,129 @@ def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> Non
         return
     db_session.delete(mattermost_bot)
     db_session.commit()
+
+
+def insert_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int,
+    channel_id: str,
+    is_ephemeral: bool,
+    enabled: bool,
+) -> MattermostChannelConfig:
+    channel_config = MattermostChannelConfig(
+        mattermost_bot_id=mattermost_bot_id,
+        channel_id=channel_id,
+        is_ephemeral=is_ephemeral,
+        enabled=enabled,
+    )
+    db_session.add(channel_config)
+    db_session.commit()
+    return channel_config
+
+
+def fetch_mattermost_channel_config(
+    db_session: Session,
+    mattermost_channel_config_id: int,
+) -> MattermostChannelConfig:
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if channel_config is None:
+        raise ValueError(
+            "Unable to find Mattermost Channel Config with ID "
+            f"{mattermost_channel_config_id}"
+        )
+    return channel_config
+
+
+def fetch_mattermost_channel_configs(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int | None = None,
+) -> list[MattermostChannelConfig]:
+    statement = select(MattermostChannelConfig)
+    if mattermost_bot_id is not None:
+        statement = statement.where(
+            MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id
+        )
+    return list(db_session.scalars(statement).all())
+
+
+def update_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+    mattermost_bot_id: int,
+    channel_id: str,
+    is_ephemeral: bool,
+    enabled: bool,
+) -> MattermostChannelConfig:
+    channel_config = fetch_mattermost_channel_config(
+        db_session, mattermost_channel_config_id
+    )
+    channel_config.mattermost_bot_id = mattermost_bot_id
+    channel_config.channel_id = channel_id
+    channel_config.is_ephemeral = is_ephemeral
+    channel_config.enabled = enabled
+    db_session.commit()
+    return channel_config
+
+
+def remove_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+) -> None:
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if channel_config is None:
+        return
+    db_session.delete(channel_config)
+    db_session.commit()
+
+
+def fetch_mattermost_private_answer_channel_ids(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> frozenset[str]:
+    channel_configs = db_session.scalars(
+        select(MattermostChannelConfig)
+        .join(MattermostBot)
+        .where(
+            MattermostBot.enabled.is_(True),
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostChannelConfig.enabled.is_(True),
+            MattermostChannelConfig.is_ephemeral.is_(True),
+        )
+    ).all()
+    return frozenset(
+        channel_config.channel_id
+        for channel_config in channel_configs
+        if _canonical_mattermost_instance_id(channel_config.mattermost_bot.url)
+        == instance_id
+    )
+
+
+def _canonical_mattermost_instance_id(url: str) -> str:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if not scheme or not hostname:
+        return url.rstrip("/")
+    port = parsed.port
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
 class MattermostThreadTombstonedError(RuntimeError):
@@ -379,6 +508,40 @@ def checkpoint_mattermost_post(
     )
 
 
+def checkpoint_mattermost_delivery_mode(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    delivery_mode: MattermostResponseDeliveryMode,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"delivery_mode": delivery_mode.value},
+    )
+
+
+def checkpoint_mattermost_terminal_outcome(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    terminal_outcome: MattermostDeliveryTerminalOutcome,
+    post_id: str | None = None,
+) -> bool:
+    values: dict[str, object] = {"terminal_outcome": terminal_outcome.value}
+    if post_id is not None:
+        values["mattermost_post_id"] = post_id
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values=values,
+    )
+
+
 def checkpoint_mattermost_turn(
     db_session: Session,
     *,
@@ -453,9 +616,13 @@ def complete_mattermost_answer_event(
     if event is None:
         db_session.rollback()
         return False
+    delivered_ephemeral = (
+        event.delivery_mode == MattermostResponseDeliveryMode.EPHEMERAL.value
+        and event.terminal_outcome == MattermostDeliveryTerminalOutcome.DELIVERED.value
+    )
     if (
         event.mapping_id is None
-        or event.mattermost_post_id is None
+        or (event.mattermost_post_id is None and not delivered_ephemeral)
         or event.onyx_assistant_message_id is None
         or event.rendered_message is None
     ):
@@ -470,7 +637,10 @@ def complete_mattermost_answer_event(
 
     mapping.parent_message_id = event.onyx_assistant_message_id
     answer_post_message_ids = dict(mapping.answer_post_message_ids)
-    answer_post_message_ids[event.mattermost_post_id] = event.onyx_assistant_message_id
+    if event.mattermost_post_id is not None:
+        answer_post_message_ids[event.mattermost_post_id] = (
+            event.onyx_assistant_message_id
+        )
     mapping.answer_post_message_ids = answer_post_message_ids
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:

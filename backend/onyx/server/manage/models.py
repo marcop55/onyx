@@ -16,6 +16,7 @@ from onyx.db.enums import (
 from onyx.db.memory import MAX_MEMORIES_PER_USER
 from onyx.db.models import AllowedAnswerFilters, ChannelConfig, User
 from onyx.db.models import MattermostBot as MattermostBotModel
+from onyx.db.models import MattermostChannelConfig as MattermostChannelConfigModel
 from onyx.db.models import (
     MattermostSlashCommandConfig as MattermostSlashCommandConfigModel,
 )
@@ -470,6 +471,33 @@ class MattermostBot(BaseModel):
             bot_username=mattermost_bot_model.bot_username,
             health_status=mattermost_bot_model.health_status,
             health_error=mattermost_bot_model.health_error,
+        )
+
+
+class MattermostChannelConfigRequest(BaseModel):
+    mattermost_bot_id: int
+    channel_id: str
+    is_ephemeral: bool = True
+    enabled: bool = True
+
+
+class MattermostChannelConfig(BaseModel):
+    id: int
+    mattermost_bot_id: int
+    channel_id: str
+    is_ephemeral: bool
+    enabled: bool
+
+    @classmethod
+    def from_model(
+        cls, config_model: MattermostChannelConfigModel
+    ) -> "MattermostChannelConfig":
+        return cls(
+            id=config_model.id,
+            mattermost_bot_id=config_model.mattermost_bot_id,
+            channel_id=config_model.channel_id,
+            is_ephemeral=config_model.is_ephemeral,
+            enabled=config_model.enabled,
         )
 
 

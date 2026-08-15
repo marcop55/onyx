@@ -543,6 +543,14 @@ export type MattermostBot = {
   health_error?: string | null;
 };
 
+export type MattermostChannelConfig = {
+  id: number;
+  mattermost_bot_id: number;
+  channel_id: string;
+  is_ephemeral: boolean;
+  enabled: boolean;
+};
+
 /* EE Only Types */
 export interface UserGroup {
   id: number;
@@ -562,6 +570,7 @@ export enum ValidSources {
   GitHub = "github",
   GitLab = "gitlab",
   Slack = "slack",
+  Seafile = "seafile",
   GoogleDrive = "google_drive",
   Gmail = "gmail",
   Bookstack = "bookstack",
@@ -644,6 +653,7 @@ export const validAutoSyncSources = [
   ValidSources.Teams,
   ValidSources.Canvas,
   ValidSources.Box,
+  ValidSources.Seafile,
 ] as const;
 
 // Create a type from the array elements

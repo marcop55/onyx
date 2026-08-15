@@ -9,14 +9,24 @@ from onyx.db.enums import Permission
 from onyx.db.mattermost_bot import (
     fetch_mattermost_bot,
     fetch_mattermost_bots,
+    fetch_mattermost_channel_config,
+    fetch_mattermost_channel_configs,
     insert_mattermost_bot,
+    insert_mattermost_channel_config,
     remove_mattermost_bot,
+    remove_mattermost_channel_config,
     update_mattermost_bot,
+    update_mattermost_channel_config,
 )
 from onyx.db.models import User
 from onyx.onyxbot.mattermost.client import MattermostClient, MattermostClientError
 from onyx.onyxbot.mattermost.models import MattermostUserInfo
-from onyx.server.manage.models import MattermostBot, MattermostBotCreationRequest
+from onyx.server.manage.models import (
+    MattermostBot,
+    MattermostBotCreationRequest,
+    MattermostChannelConfig,
+    MattermostChannelConfigRequest,
+)
 
 router = APIRouter(prefix="/manage")
 
@@ -133,3 +143,68 @@ def list_bots(
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> list[MattermostBot]:
     return [MattermostBot.from_model(bot) for bot in fetch_mattermost_bots(db_session)]
+
+
+@router.post("/admin/mattermost-app/channel")
+def create_mattermost_channel_config(
+    request: MattermostChannelConfigRequest,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> MattermostChannelConfig:
+    fetch_mattermost_bot(db_session, request.mattermost_bot_id)
+    config_model = insert_mattermost_channel_config(
+        db_session=db_session,
+        mattermost_bot_id=request.mattermost_bot_id,
+        channel_id=request.channel_id,
+        is_ephemeral=request.is_ephemeral,
+        enabled=request.enabled,
+    )
+    return MattermostChannelConfig.from_model(config_model)
+
+
+@router.patch("/admin/mattermost-app/channel/{mattermost_channel_config_id}")
+def patch_mattermost_channel_config(
+    mattermost_channel_config_id: int,
+    request: MattermostChannelConfigRequest,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> MattermostChannelConfig:
+    fetch_mattermost_channel_config(db_session, mattermost_channel_config_id)
+    fetch_mattermost_bot(db_session, request.mattermost_bot_id)
+    config_model = update_mattermost_channel_config(
+        db_session=db_session,
+        mattermost_channel_config_id=mattermost_channel_config_id,
+        mattermost_bot_id=request.mattermost_bot_id,
+        channel_id=request.channel_id,
+        is_ephemeral=request.is_ephemeral,
+        enabled=request.enabled,
+    )
+    return MattermostChannelConfig.from_model(config_model)
+
+
+@router.delete("/admin/mattermost-app/channel/{mattermost_channel_config_id}")
+def delete_mattermost_channel_config(
+    mattermost_channel_config_id: int,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> None:
+    remove_mattermost_channel_config(
+        db_session=db_session,
+        mattermost_channel_config_id=mattermost_channel_config_id,
+    )
+
+
+@router.get("/admin/mattermost-app/channel")
+def list_mattermost_channel_configs(
+    mattermost_bot_id: int | None = None,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> list[MattermostChannelConfig]:
+    config_models = fetch_mattermost_channel_configs(
+        db_session=db_session,
+        mattermost_bot_id=mattermost_bot_id,
+    )
+    return [
+        MattermostChannelConfig.from_model(config_model)
+        for config_model in config_models
+    ]
