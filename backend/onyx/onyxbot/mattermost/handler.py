@@ -940,6 +940,7 @@ async def handle_normalized_mattermost_event(
         return False
     schedule_mattermost_feedback_reminder(
         instance_id=ledger_event.instance_id,
+        bot_user_id=config.bot_user_id or "",
         channel_id=event.channel_id,
         root_post_id=event.root_post_id,
         answer_post_id=answer_post_ids[0],

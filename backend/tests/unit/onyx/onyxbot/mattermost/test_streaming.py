@@ -852,6 +852,7 @@ async def test_handle_normalized_event_streams_and_records_parent_message(
     mock_complete.assert_called_once()
     mock_schedule_feedback_reminder.assert_called_once_with(
         instance_id="instance-1",
+        bot_user_id="",
         channel_id="channel-1",
         root_post_id="root-post-1",
         answer_post_id="bot-post-1",

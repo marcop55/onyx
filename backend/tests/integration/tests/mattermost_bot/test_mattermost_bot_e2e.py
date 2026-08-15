@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
 
+from onyx.background.celery.tasks.mattermost_feedback import (
+    mattermost_feedback_reminder,
+)
 from onyx.chat.models import AnswerStreamPart
 from onyx.configs.constants import DocumentSource
 from onyx.context.search.models import SearchDoc
 from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
 from onyx.db.models import MattermostEventState
+from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
     handle_normalized_mattermost_event,
@@ -269,6 +276,86 @@ async def test_reaction_feedback_records_message_without_mattermost_credentials(
     assert mock_feedback.call_args.kwargs["chat_message_id"] == 44
 
 
+def test_scheduled_feedback_reminder_execution_is_visible_and_replay_safe() -> None:
+    client = _ReminderExecutionClient(
+        memberships=[True, True, True, True],
+        create_error=MattermostClientError("committed but transport timed out"),
+    )
+    first_claim = _processing_claim(event_id=77, pending_post_id="pending-reminder")
+    second_claim = _processing_claim(event_id=77, pending_post_id="pending-reminder")
+    second_claim.event.state = "post_create_attempted"
+    claims = iter(
+        [
+            first_claim,
+            second_claim,
+        ]
+    )
+    complete_results = iter([False, True])
+
+    with (
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.get_session_with_current_tenant",
+            _reminder_session_context,
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.fetch_mattermost_bot_by_instance_and_user",
+            return_value=SimpleNamespace(
+                url="https://mattermost.example.test",
+                token=_ReminderToken(),
+                enabled=True,
+            ),
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.fetch_mattermost_channel_config_for_bot_and_channel",
+            return_value=SimpleNamespace(channel_config={}, enabled=True),
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.claim_durable_mattermost_event",
+            side_effect=lambda *_args, **_kwargs: next(claims),
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.checkpoint_mattermost_post_attempt",
+            return_value=True,
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.complete_mattermost_control_event",
+            side_effect=lambda *_args, **_kwargs: next(complete_results),
+        ),
+        patch(
+            "onyx.background.celery.tasks.mattermost_feedback.MattermostClient",
+            return_value=client,
+        ),
+    ):
+        first_result = mattermost_feedback_reminder(
+            instance_id="https://mattermost.example.test",
+            bot_user_id=_BOT_USER_ID,
+            channel_id="channel-1",
+            root_post_id="root-post-1",
+            answer_post_id="answer-post-1",
+            user_id=_APPROVED_USER_ID,
+        )
+        client.create_error = None
+        second_result = mattermost_feedback_reminder(
+            instance_id="https://mattermost.example.test",
+            bot_user_id=_BOT_USER_ID,
+            channel_id="channel-1",
+            root_post_id="root-post-1",
+            answer_post_id="answer-post-1",
+            user_id=_APPROVED_USER_ID,
+        )
+
+    assert first_result["status"] == "ambiguous"
+    assert second_result == {"status": "delivered", "post_id": "reminder-post-1"}
+    assert [post["message"] for post in client.created_posts] == [
+        "Please rate the Mattermost answer with Helpful or Not helpful, or mark it as needing follow-up or resolved."
+    ]
+    assert client.created_posts[0]["root_id"] == "root-post-1"
+
+
 def _listener_config(
     *,
     owned_answer_post_message_ids: dict[str, int] | None = None,
@@ -459,3 +546,94 @@ class _RecordingClient:
 
     async def download_file(self, file_id: str) -> bytes:
         raise AssertionError(f"unexpected file download: {file_id}")
+
+
+class _ReminderToken:
+    def get_value(self, *, apply_mask: bool) -> str:
+        _ = apply_mask
+        return "mattermost-token"
+
+
+@contextmanager
+def _reminder_session_context() -> Iterator[object]:
+    yield object()
+
+
+class _ReminderExecutionClient:
+    def __init__(
+        self,
+        *,
+        memberships: list[bool],
+        create_error: Exception | None = None,
+    ) -> None:
+        self.memberships = memberships
+        self.create_error = create_error
+        self.created_posts: list[dict[str, Any]] = []
+
+    async def __aenter__(self) -> _ReminderExecutionClient:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        _ = channel_id, user_id
+        return self.memberships.pop(0)
+
+    async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]:
+        return [
+            MattermostPost(id=root_post_id, channel_id="channel-1"),
+            MattermostPost(
+                id="answer-post-1",
+                root_id=root_post_id,
+                channel_id="channel-1",
+            ),
+            *[
+                MattermostPost(
+                    id=str(post["id"]),
+                    message=str(post["message"]),
+                    root_id=str(post["root_id"]),
+                    channel_id=str(post["channel_id"]),
+                    pending_post_id=str(post["pending_post_id"]),
+                    props=cast(dict[str, object], post["props"]),
+                )
+                for post in self.created_posts
+            ],
+        ]
+
+    async def find_post_by_idempotency_fields(
+        self,
+        *,
+        channel_id: str,
+        pending_post_id: str,
+        event_key: str,
+    ) -> MattermostPost | None:
+        for post in self.created_posts:
+            props = post["props"]
+            if (
+                post["pending_post_id"] == pending_post_id
+                or props["onyx_event_key"] == event_key
+            ):
+                return MattermostPost(
+                    id=str(post["id"]),
+                    message=str(post["message"]),
+                    root_id=str(post["root_id"]),
+                    channel_id=channel_id,
+                    pending_post_id=str(post["pending_post_id"]),
+                    props=props,
+                )
+        return None
+
+    async def create_post(self, **kwargs: Any) -> MattermostPost:
+        post = {"id": f"reminder-post-{len(self.created_posts) + 1}", **kwargs}
+        self.created_posts.append(post)
+        if self.create_error is not None:
+            raise self.create_error
+        return MattermostPost(
+            id=str(post["id"]),
+            message=str(post["message"]),
+            root_id=str(post["root_id"]),
+            channel_id=str(post["channel_id"]),
+            pending_post_id=str(post["pending_post_id"]),
+            props=cast(dict[str, object], post["props"]),
+        )
