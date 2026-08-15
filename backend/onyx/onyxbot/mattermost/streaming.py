@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -33,6 +33,7 @@ MATTERMOST_STREAM_FAILURE_SUFFIX = (
 )
 MATTERMOST_NO_CITATIONS_MESSAGE = "Found no citations or quotes when trying to answer."
 MATTERMOST_MIN_UPDATE_CHARS = 80
+MattermostFinalPropsFactory = Callable[[int, str], Awaitable[dict[str, object] | None]]
 
 
 class MattermostStreamVisibleError(RuntimeError):
@@ -72,11 +73,19 @@ class MattermostStreamingClient(Protocol):
         event_key: str,
     ) -> MattermostPost | None: ...
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost: ...
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost: ...
 
     async def get_file_info(self, file_id: str) -> MattermostFileInfo: ...
 
     async def get_user_info(self, user_id: str) -> MattermostUserInfo: ...
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool: ...
 
     async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]: ...
 
@@ -99,6 +108,7 @@ async def stream_mattermost_answer(
     post_id: str | None = None,
     checkpoint_final: Callable[[str, int], None] | None = None,
     before_external_update: Callable[[], bool] | None = None,
+    final_props_factory: MattermostFinalPropsFactory | None = None,
     min_update_chars: int = MATTERMOST_MIN_UPDATE_CHARS,
     response_type: str = "citations",
     include_source_previews: bool = False,
@@ -210,6 +220,9 @@ async def stream_mattermost_answer(
         rendered_message=final_message,
         sent_messages=sent_messages,
         before_external_update=before_external_update,
+        props=await final_props_factory(message_id, final_message)
+        if final_props_factory is not None
+        else None,
     )
     return MattermostStreamResult(
         message_id=message_id,
@@ -334,6 +347,7 @@ async def deliver_mattermost_rendered_messages(
     rendered_message: str,
     sent_messages: set[str] | None = None,
     before_external_update: Callable[[], bool] | None = None,
+    props: dict[str, object] | None = None,
 ) -> tuple[str, ...]:
     messages = _deserialize_rendered_messages(rendered_message)
     if not messages:
@@ -346,6 +360,7 @@ async def deliver_mattermost_rendered_messages(
         post_id=post_id,
         message=messages[0],
         sent_messages=sent_message_set,
+        props=props,
     )
     delivered_post_ids = [post_id]
     for part_index, message in enumerate(messages[1:], start=2):
@@ -442,10 +457,14 @@ async def _update_once(
     post_id: str,
     message: str,
     sent_messages: set[str],
+    props: dict[str, object] | None = None,
 ) -> None:
-    if message in sent_messages:
+    if props is None and message in sent_messages:
         return
-    await client.update_post(post_id=post_id, message=message)
+    if props is None:
+        await client.update_post(post_id=post_id, message=message)
+    else:
+        await client.update_post(post_id=post_id, message=message, props=props)
     sent_messages.add(message)
 
 
