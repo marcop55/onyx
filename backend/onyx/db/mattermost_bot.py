@@ -2,6 +2,7 @@ import datetime
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
@@ -14,6 +15,7 @@ from onyx.db.models import (
     ChatSession,
     MattermostAttachment,
     MattermostBot,
+    MattermostChannelConfig,
     MattermostEventState,
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
@@ -106,6 +108,129 @@ def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> Non
         return
     db_session.delete(mattermost_bot)
     db_session.commit()
+
+
+def insert_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int,
+    channel_id: str,
+    is_ephemeral: bool,
+    enabled: bool,
+) -> MattermostChannelConfig:
+    channel_config = MattermostChannelConfig(
+        mattermost_bot_id=mattermost_bot_id,
+        channel_id=channel_id,
+        is_ephemeral=is_ephemeral,
+        enabled=enabled,
+    )
+    db_session.add(channel_config)
+    db_session.commit()
+    return channel_config
+
+
+def fetch_mattermost_channel_config(
+    db_session: Session,
+    mattermost_channel_config_id: int,
+) -> MattermostChannelConfig:
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if channel_config is None:
+        raise ValueError(
+            "Unable to find Mattermost Channel Config with ID "
+            f"{mattermost_channel_config_id}"
+        )
+    return channel_config
+
+
+def fetch_mattermost_channel_configs(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int | None = None,
+) -> list[MattermostChannelConfig]:
+    statement = select(MattermostChannelConfig)
+    if mattermost_bot_id is not None:
+        statement = statement.where(
+            MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id
+        )
+    return list(db_session.scalars(statement).all())
+
+
+def update_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+    mattermost_bot_id: int,
+    channel_id: str,
+    is_ephemeral: bool,
+    enabled: bool,
+) -> MattermostChannelConfig:
+    channel_config = fetch_mattermost_channel_config(
+        db_session, mattermost_channel_config_id
+    )
+    channel_config.mattermost_bot_id = mattermost_bot_id
+    channel_config.channel_id = channel_id
+    channel_config.is_ephemeral = is_ephemeral
+    channel_config.enabled = enabled
+    db_session.commit()
+    return channel_config
+
+
+def remove_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+) -> None:
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if channel_config is None:
+        return
+    db_session.delete(channel_config)
+    db_session.commit()
+
+
+def fetch_mattermost_private_answer_channel_ids(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> frozenset[str]:
+    channel_configs = db_session.scalars(
+        select(MattermostChannelConfig)
+        .join(MattermostBot)
+        .where(
+            MattermostBot.enabled.is_(True),
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostChannelConfig.enabled.is_(True),
+            MattermostChannelConfig.is_ephemeral.is_(True),
+        )
+    ).all()
+    return frozenset(
+        channel_config.channel_id
+        for channel_config in channel_configs
+        if _canonical_mattermost_instance_id(channel_config.mattermost_bot.url)
+        == instance_id
+    )
+
+
+def _canonical_mattermost_instance_id(url: str) -> str:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if not scheme or not hostname:
+        return url.rstrip("/")
+    port = parsed.port
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
 class MattermostThreadTombstonedError(RuntimeError):

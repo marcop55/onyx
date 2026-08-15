@@ -3547,6 +3547,51 @@ class MattermostBot(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    channel_configs: Mapped[list["MattermostChannelConfig"]] = relationship(
+        "MattermostChannelConfig",
+        back_populates="mattermost_bot",
+        cascade="all, delete-orphan",
+    )
+
+
+class MattermostChannelConfig(Base):
+    __tablename__ = "mattermost_channel_config"
+    __table_args__ = (
+        UniqueConstraint(
+            "mattermost_bot_id",
+            "channel_id",
+            name="uq_mattermost_channel_config_bot_channel",
+        ),
+        Index(
+            "ix_mattermost_channel_config_bot_enabled",
+            "mattermost_bot_id",
+            "enabled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mattermost_bot_id: Mapped[int] = mapped_column(
+        ForeignKey("mattermost_bot.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    is_ephemeral: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    mattermost_bot: Mapped[MattermostBot] = relationship(
+        "MattermostBot",
+        back_populates="channel_configs",
+    )
+
 
 class SearchDoc(Base):
     """Different from Document table. This one stores the state of a document from a retrieval.

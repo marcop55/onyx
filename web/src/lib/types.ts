@@ -543,6 +543,14 @@ export type MattermostBot = {
   health_error?: string | null;
 };
 
+export type MattermostChannelConfig = {
+  id: number;
+  mattermost_bot_id: number;
+  channel_id: string;
+  is_ephemeral: boolean;
+  enabled: boolean;
+};
+
 /* EE Only Types */
 export interface UserGroup {
   id: number;
