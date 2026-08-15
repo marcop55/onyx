@@ -78,6 +78,21 @@ def test_successful_chat_capabilities_pin_mattermost_native_evidence() -> None:
         assert any("mattermost/handler.py" in evidence for evidence in entry.evidence)
 
 
+def test_bot_instance_configuration_uses_managed_mattermost_control_plane() -> None:
+    entry = matrix_by_key()["bot_instance_configuration"]
+
+    assert entry.status is MattermostParityStatus.DIRECT_MATTERMOST_FEATURE
+    assert "Onyx managed DB/API/admin UI" in entry.mattermost_contract
+    assert "steady_state_managed_config" in entry.guarantees
+    assert "deployment-file" not in entry.mattermost_contract.lower()
+    assert "outside Onyx" not in (entry.fallback or "")
+    assert any(
+        "server/manage/mattermost_bot.py" in evidence for evidence in entry.evidence
+    )
+    assert any("db/models.py:MattermostBot" in evidence for evidence in entry.evidence)
+    assert any("admin/mattermost-bots" in evidence for evidence in entry.evidence)
+
+
 def test_authorization_denial_is_manifested_for_admitted_runtime_paths() -> None:
     admitted_runtime_entries = [
         entry

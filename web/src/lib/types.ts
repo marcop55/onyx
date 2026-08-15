@@ -531,6 +531,18 @@ export interface SlackBotTokens {
   user_token?: string;
 }
 
+export type MattermostBot = {
+  id: number;
+  name: string;
+  url: string;
+  enabled: boolean;
+  token: string;
+  bot_user_id: string;
+  bot_username: string;
+  health_status: string;
+  health_error?: string | null;
+};
+
 /* EE Only Types */
 export interface UserGroup {
   id: number;
