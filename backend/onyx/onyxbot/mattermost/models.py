@@ -16,6 +16,7 @@ class MattermostNormalizedEventType(StrEnum):
     CHANNEL_MENTION = "channel_mention"
     ROOT_ALLOWLISTED_POST = "root_allowlisted_post"
     THREAD_REPLY_FOLLOWUP = "thread_reply_followup"
+    SLASH_COMMAND = "slash_command"
     POST_UPDATE_RETRY = "post_update_retry"
     REACTION_FEEDBACK = "reaction_feedback"
     POST_DELETE_TOMBSTONE = "post_delete_tombstone"

@@ -228,7 +228,10 @@ updates, reaction feedback mapping, and replay deduplication without contacting 
 
 Live disposable Mattermost verification is gated on separate test credentials. Required secret names
 are `MATTERMOST_BOT_URL`, `MATTERMOST_BOT_TOKEN`, `MATTERMOST_BOT_PERSONA_ID`, and
-`MATTERMOST_BOT_USER_ID`. Optional emergency narrowing controls are
+`MATTERMOST_BOT_USER_ID`. `MATTERMOST_SLASH_COMMAND_TOKEN` is a bootstrap-only
+input: the service imports it into `mattermost_slash_command_config`, then
+steady-state `/orka` authorization uses the encrypted per-instance/bot DB row
+managed through `/manage/admin/mattermost/slash-command`. Optional emergency narrowing controls are
 `MATTERMOST_BOT_ALLOWED_CHANNEL_IDS`, `MATTERMOST_BOT_ALLOWED_TEAM_IDS`,
 `MATTERMOST_BOT_APPROVED_USER_IDS`, and `MATTERMOST_BOT_ROOT_POST_CHANNEL_IDS`. Empty channel,
 team, and user restrictions mean membership-based access. These values must point to a disposable

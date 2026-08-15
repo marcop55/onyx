@@ -3158,6 +3158,38 @@ class MattermostThreadMapping(Base):
     persona: Mapped["Persona | None"] = relationship("Persona")
 
 
+class MattermostSlashCommandConfig(Base):
+    __tablename__ = "mattermost_slash_command_config"
+    __table_args__ = (
+        UniqueConstraint(
+            "instance_id",
+            "bot_user_id",
+            name="uq_mattermost_slash_command_config_instance_bot",
+        ),
+        Index(
+            "ix_mattermost_slash_command_config_lookup",
+            "instance_id",
+            "bot_user_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String, nullable=False)
+    bot_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    token: Mapped[SensitiveValue[str] | None] = mapped_column(
+        EncryptedString(), nullable=False
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ChatMessage(Base):
     """Note, the first message in a chain has no contents, it's a workaround to allow edits
     on the first message of a session, an empty root node basically

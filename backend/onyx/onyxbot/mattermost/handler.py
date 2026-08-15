@@ -739,7 +739,10 @@ def _build_mattermost_context(
 
 
 def _response_root_id(event: NormalizedMattermostEvent) -> str:
-    if event.event_type == MattermostNormalizedEventType.DIRECT_MESSAGE:
+    if event.event_type in {
+        MattermostNormalizedEventType.DIRECT_MESSAGE,
+        MattermostNormalizedEventType.SLASH_COMMAND,
+    }:
         return ""
     return event.root_post_id
 
