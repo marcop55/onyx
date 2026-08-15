@@ -256,6 +256,53 @@ async def test_channel_filter_denial_preserves_ephemeral_delivery(
     ]
 
 
+@pytest.mark.asyncio
+async def test_channel_filter_denial_for_public_mention_never_posts_publicly() -> None:
+    from onyx.onyxbot.mattermost.channel_filters import (
+        MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+        MattermostChannelFilterResolutionError,
+    )
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(id=7),
+    )
+    event = replace(_channel_event(), text="summarize in:secret")
+
+    with (
+        _patched_chat_path(target=target),
+        patch(
+            "onyx.onyxbot.mattermost.handler.resolve_mattermost_channel_filters",
+            side_effect=MattermostChannelFilterResolutionError("denied"),
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    assert client.created_posts == []
+    assert client.created_ephemeral_posts == [
+        {
+            "user_id": "sender-1",
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+        }
+    ]
+
+
 @pytest.mark.parametrize("entrypoint", ["slash", "private_channel"])
 @pytest.mark.asyncio
 async def test_allowed_channel_filter_constrains_ephemeral_retrieval(
@@ -372,6 +419,51 @@ async def test_completed_private_delivery_replay_never_reruns_model_or_reposts()
     assert client.created_posts == []
     assert client.created_ephemeral_posts == []
     assert client.updated_posts == []
+    calls.handle_stream.assert_not_called()
+    calls.complete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_completed_filtered_private_replay_skips_filter_resolution() -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(id=7),
+    )
+    event = replace(_slash_event(), text="summarize in:secret")
+    claim = _processing_claim(
+        delivery_mode=MattermostResponseDeliveryMode.EPHEMERAL,
+        terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERED,
+        onyx_assistant_message_id=22,
+        rendered_message="already delivered",
+    )
+
+    with (
+        _patched_chat_path(target=target, claim=claim) as calls,
+        patch(
+            "onyx.onyxbot.mattermost.handler.resolve_mattermost_channel_filters"
+        ) as resolve_filters,
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    assert client.created_posts == []
+    assert client.created_ephemeral_posts == []
+    assert client.updated_posts == []
+    resolve_filters.assert_not_called()
     calls.handle_stream.assert_not_called()
     calls.complete.assert_called_once()
 

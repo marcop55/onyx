@@ -335,6 +335,20 @@ async def handle_normalized_mattermost_event(
                 claim_owner=claim_owner,
             )
 
+        ledger_event = claim.event
+        if ledger_event.terminal_outcome is not None:
+            if (
+                ledger_event.terminal_outcome
+                == MattermostDeliveryTerminalOutcome.DELIVERED.value
+            ):
+                return complete_mattermost_answer_event(
+                    db_session,
+                    event_id=ledger_event.id,
+                    claim_owner=claim_owner,
+                    loaded_context_post_ids=frozenset(),
+                )
+            return False
+
         try:
             channel_filter_result = await resolve_mattermost_channel_filters(
                 event=event,
@@ -345,7 +359,7 @@ async def handle_normalized_mattermost_event(
                 client=client,
                 event=event,
                 message=MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
-                delivery_mode=_resolve_delivery_mode(event=event, config=config),
+                delivery_mode=MattermostResponseDeliveryMode.EPHEMERAL,
             )
             return complete_mattermost_control_event(
                 db_session,
@@ -369,7 +383,6 @@ async def handle_normalized_mattermost_event(
             ),
         )
 
-        ledger_event = claim.event
         delivery_mode = _resolve_delivery_mode(event=event, config=config)
         if ledger_event.delivery_mode is None:
             if not checkpoint_mattermost_delivery_mode(
@@ -382,23 +395,6 @@ async def handle_normalized_mattermost_event(
             ledger_event.delivery_mode = delivery_mode.value
         else:
             delivery_mode = MattermostResponseDeliveryMode(ledger_event.delivery_mode)
-
-        if ledger_event.terminal_outcome is not None:
-            if (
-                ledger_event.terminal_outcome
-                == MattermostDeliveryTerminalOutcome.DELIVERED.value
-            ):
-                return complete_mattermost_answer_event(
-                    db_session,
-                    event_id=ledger_event.id,
-                    claim_owner=claim_owner,
-                    loaded_context_post_ids=(
-                        thread_context.post_ids
-                        if thread_context is not None
-                        else frozenset()
-                    ),
-                )
-            return False
 
         if (
             ledger_event.onyx_assistant_message_id is not None
