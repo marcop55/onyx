@@ -11,10 +11,13 @@ from onyx.context.search.models import SearchDoc
 from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
 from onyx.db.models import MattermostEventState
 from onyx.onyxbot.mattermost.client import MattermostClientError
+from onyx.onyxbot.mattermost.formatting import MATTERMOST_DEFAULT_MAX_PART_CHARS
 from onyx.onyxbot.mattermost.models import (
     MattermostFileInfo,
     MattermostPost,
+    MattermostResponseDeliveryMode,
     MattermostUserInfo,
+    NormalizedMattermostEvent,
 )
 from onyx.onyxbot.mattermost.streaming import (
     MATTERMOST_NO_CITATIONS_MESSAGE,
@@ -1328,6 +1331,150 @@ async def test_rendered_message_replay_restores_interactive_props_before_complet
     assert client.identity_calls == ["user-1"]
 
 
+@pytest.mark.parametrize("message_length", [15_000, 15_001])
+@pytest.mark.asyncio
+async def test_public_rendered_message_replay_bounds_external_payloads(
+    message_length: int,
+) -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    rendered_message = "x" * message_length
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(
+                state="turn_created",
+                mattermost_post_id="bot-post-1",
+                onyx_assistant_message_id=22,
+                rendered_message=rendered_message,
+                delivery_mode=MattermostResponseDeliveryMode.PUBLIC_THREAD,
+            ),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=_channel_mention_event(),
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    delivered_messages = _delivered_messages(client)
+    assert handled is True
+    assert delivered_messages
+    assert all(
+        len(message) <= MATTERMOST_DEFAULT_MAX_PART_CHARS
+        for message in delivered_messages
+    )
+    assert "".join(delivered_messages) == rendered_message
+    if message_length == MATTERMOST_DEFAULT_MAX_PART_CHARS:
+        assert client.created_posts == []
+    else:
+        assert client.created_posts == [
+            {
+                "channel_id": "channel-1",
+                "root_id": "root-post-1",
+                "message": "x",
+                "pending_post_id": "bot-post-1:part:2",
+                "props": {"onyx_event_key": "bot-post-1:part:2"},
+            }
+        ]
+
+
+@pytest.mark.parametrize("message_length", [15_000, 15_001])
+@pytest.mark.asyncio
+async def test_ephemeral_rendered_message_replay_bounds_external_payloads(
+    message_length: int,
+) -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(),
+    )
+    rendered_message = "x" * message_length
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account",
+            return_value=MagicMock(id="00000000-0000-0000-0000-000000000456"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(
+                state="turn_created",
+                onyx_assistant_message_id=22,
+                rendered_message=rendered_message,
+                delivery_mode=MattermostResponseDeliveryMode.EPHEMERAL,
+            ),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.renew_mattermost_event_lease",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_terminal_outcome",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=_slash_command_event(),
+            config=MattermostHandlerConfig(persona_id=456),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    delivered_messages = [str(post["message"]) for post in client.ephemeral_posts]
+    assert handled is True
+    assert delivered_messages
+    assert all(
+        len(message) <= MATTERMOST_DEFAULT_MAX_PART_CHARS
+        for message in delivered_messages
+    )
+    if message_length == MATTERMOST_DEFAULT_MAX_PART_CHARS:
+        assert delivered_messages == [rendered_message]
+    else:
+        assert rendered_message not in delivered_messages
+
+
 @pytest.mark.parametrize(
     "memberships,identity",
     [
@@ -1614,6 +1761,7 @@ def _processing_claim(
     mattermost_post_id: str | None = None,
     onyx_assistant_message_id: int | None = None,
     rendered_message: str | None = None,
+    delivery_mode: MattermostResponseDeliveryMode | None = None,
 ) -> MattermostEventClaim:
     ledger_event = MattermostEventState(
         id=1,
@@ -1627,6 +1775,7 @@ def _processing_claim(
         state=state,
         onyx_assistant_message_id=onyx_assistant_message_id,
         rendered_message=rendered_message,
+        delivery_mode=delivery_mode.value if delivery_mode is not None else None,
     )
     claim_owner = UUID("00000000-0000-0000-0000-000000000999")
     return MattermostEventClaim(
@@ -1642,6 +1791,44 @@ def _checkpointed_placeholder_post() -> dict[str, object]:
         "pending_post_id": "pending-1",
         "props": {"onyx_event_key": "1"},
     }
+
+
+def _channel_mention_event() -> NormalizedMattermostEvent:
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+
+    return NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.CHANNEL_MENTION,
+        session_key="mattermost:channel:team-1:channel-1:root-post-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text="what changed?",
+        dedupe_key="event_id:root-post-1",
+    )
+
+
+def _slash_command_event() -> NormalizedMattermostEvent:
+    from onyx.onyxbot.mattermost.models import (
+        MattermostNormalizedEventType,
+        NormalizedMattermostEvent,
+    )
+
+    return NormalizedMattermostEvent(
+        event_type=MattermostNormalizedEventType.SLASH_COMMAND,
+        session_key="mattermost:slash:team-1:channel-1:user-1",
+        team_id="team-1",
+        channel_id="channel-1",
+        post_id="root-post-1",
+        root_post_id="root-post-1",
+        user_id="user-1",
+        text="what changed?",
+        dedupe_key="event_id:root-post-1",
+    )
 
 
 def _packet(obj: PacketObj) -> Packet:

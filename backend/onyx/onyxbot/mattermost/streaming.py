@@ -184,6 +184,7 @@ async def stream_mattermost_answer(
                         ),
                         sent_messages=sent_messages,
                         before_external_update=before_external_update,
+                        max_part_chars=max_part_chars,
                     )
                     last_sent_answer_length = len(answer)
             elif isinstance(packet.obj, CitationInfo):
@@ -250,6 +251,7 @@ async def stream_mattermost_answer(
         props=await final_props_factory(message_id, final_message)
         if final_props_factory is not None
         else None,
+        max_part_chars=max_part_chars,
     )
     return MattermostStreamResult(
         message_id=message_id,
@@ -380,10 +382,9 @@ async def deliver_mattermost_rendered_messages(
     sent_messages: set[str] | None = None,
     before_external_update: Callable[[], bool] | None = None,
     props: dict[str, object] | None = None,
+    max_part_chars: int = MATTERMOST_DEFAULT_MAX_PART_CHARS,
 ) -> tuple[str, ...]:
-    messages = _deserialize_rendered_messages(rendered_message)
-    if not messages:
-        messages = [""]
+    messages = _bounded_rendered_message_parts(rendered_message, max_part_chars)
     sent_message_set = sent_messages if sent_messages is not None else set()
 
     _require_owner_fence(before_external_update)
@@ -519,6 +520,7 @@ async def _show_failure(
             _format_failure_message_parts(answer, max_part_chars)
         ),
         sent_messages=sent_messages,
+        max_part_chars=max_part_chars,
     )
 
 
@@ -542,6 +544,16 @@ def _format_failure_message_parts(answer: str, max_part_chars: int) -> list[str]
     )
 
 
+def bound_mattermost_ephemeral_rendered_message(
+    rendered_message: str,
+    max_part_chars: int = MATTERMOST_DEFAULT_MAX_PART_CHARS,
+) -> str:
+    return _bounded_ephemeral_message(
+        _bounded_rendered_message_parts(rendered_message, max_part_chars),
+        max_part_chars,
+    )
+
+
 def _bounded_ephemeral_message(messages: list[str], max_part_chars: int) -> str:
     if len(messages) == 1 and len(messages[0]) <= max_part_chars:
         return messages[0]
@@ -549,6 +561,18 @@ def _bounded_ephemeral_message(messages: list[str], max_part_chars: int) -> str:
         MATTERMOST_EPHEMERAL_TOO_LONG_MESSAGE,
         max_part_chars,
     )[0]
+
+
+def _bounded_rendered_message_parts(
+    rendered_message: str, max_part_chars: int
+) -> list[str]:
+    messages = _deserialize_rendered_messages(rendered_message)
+    if not messages:
+        messages = [""]
+    bounded_messages: list[str] = []
+    for message in messages:
+        bounded_messages.extend(_bounded_text_parts(message, max_part_chars))
+    return bounded_messages
 
 
 def _bounded_text_parts(text: str, limit: int) -> list[str]:

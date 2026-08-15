@@ -88,6 +88,7 @@ from onyx.onyxbot.mattermost.streaming import (
     MattermostLeaseLostError,
     MattermostStreamingClient,
     MattermostStreamVisibleError,
+    bound_mattermost_ephemeral_rendered_message,
     deliver_mattermost_rendered_messages,
     stream_mattermost_answer,
     stream_mattermost_ephemeral_answer,
@@ -746,7 +747,9 @@ async def _deliver_ephemeral_rendered_message(
         user_id=event.user_id,
         channel_id=event.channel_id,
         root_id=_response_root_id(event),
-        message=ledger_event.rendered_message or "",
+        message=bound_mattermost_ephemeral_rendered_message(
+            ledger_event.rendered_message or ""
+        ),
         props={"onyx_event_key": str(ledger_event.id)},
     )
     if not checkpoint_mattermost_terminal_outcome(
