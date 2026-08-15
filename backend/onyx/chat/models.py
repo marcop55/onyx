@@ -39,17 +39,6 @@ class CreateChatSessionID(BaseModel):
     chat_session_id: UUID
 
 
-AnswerStreamPart = (
-    Packet
-    | MessageResponseIDInfo
-    | MultiModelMessageResponseIDInfo
-    | StreamingError
-    | CreateChatSessionID
-)
-
-AnswerStream = Iterator[AnswerStreamPart]
-
-
 class ToolCallResponse(BaseModel):
     """Tool call with full details for non-streaming response."""
 
@@ -72,6 +61,18 @@ class ChatBasicResponse(BaseModel):
     error_msg: str | None
     message_id: int
     citation_info: list[CitationInfo]
+
+
+AnswerStreamPart = (
+    Packet
+    | MessageResponseIDInfo
+    | MultiModelMessageResponseIDInfo
+    | StreamingError
+    | CreateChatSessionID
+    | ChatBasicResponse
+)
+
+AnswerStream = Iterator[AnswerStreamPart]
 
 
 class ChatFullResponse(BaseModel):
