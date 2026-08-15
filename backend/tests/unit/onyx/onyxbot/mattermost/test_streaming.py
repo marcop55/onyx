@@ -677,7 +677,7 @@ async def test_ambiguous_post_replay_never_issues_second_post_after_search_miss(
 class _RecordingClient:
     def __init__(self) -> None:
         self.created_posts: list[dict[str, str]] = []
-        self.updated_posts: list[dict[str, str]] = []
+        self.updated_posts: list[dict[str, object]] = []
         self.reconciliation_requests: list[dict[str, str]] = []
         self.create_error: MattermostClientError | None = None
         self.reconciliation_error: MattermostClientError | None = None
@@ -707,6 +707,24 @@ class _RecordingClient:
             channel_id=channel_id,
         )
 
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = user_id, props
+        return MattermostPost(
+            id="ephemeral-post-1",
+            message=message,
+            root_id=root_id,
+            user_id="bot-user-1",
+            channel_id=channel_id,
+        )
+
     async def find_post_by_idempotency_fields(
         self,
         *,
@@ -727,8 +745,17 @@ class _RecordingClient:
             return self.reconciled_post_after_create_error
         return self.reconciled_post
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
-        self.updated_posts.append({"post_id": post_id, "message": message})
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        updated_post: dict[str, object] = {"post_id": post_id, "message": message}
+        if props is not None:
+            updated_post["props"] = props
+        self.updated_posts.append(updated_post)
         return MattermostPost(
             id=post_id,
             message=message,

@@ -27,6 +27,7 @@ MATTERMOST_STREAM_FAILURE_SUFFIX = (
     "Onyx stopped before it finished this answer. Try again later."
 )
 MATTERMOST_MIN_UPDATE_CHARS = 80
+MattermostFinalPropsFactory = Callable[[int, str], dict[str, object] | None]
 
 
 class MattermostStreamVisibleError(RuntimeError):
@@ -66,7 +67,13 @@ class MattermostStreamingClient(Protocol):
         event_key: str,
     ) -> MattermostPost | None: ...
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost: ...
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost: ...
 
     async def get_file_info(self, file_id: str) -> MattermostFileInfo: ...
 
@@ -92,6 +99,7 @@ async def stream_mattermost_answer(
     post_id: str | None = None,
     checkpoint_final: Callable[[str, int], None] | None = None,
     before_external_update: Callable[[], bool] | None = None,
+    final_props_factory: MattermostFinalPropsFactory | None = None,
     min_update_chars: int = MATTERMOST_MIN_UPDATE_CHARS,
 ) -> MattermostStreamResult:
     """Create or resume one Mattermost post and update it from Onyx packets."""
@@ -184,6 +192,9 @@ async def stream_mattermost_answer(
         post_id=post_id,
         message=final_message,
         sent_messages=sent_messages,
+        props=final_props_factory(message_id, final_message)
+        if final_props_factory is not None
+        else None,
     )
     return MattermostStreamResult(
         message_id=message_id,
@@ -325,10 +336,14 @@ async def _update_once(
     post_id: str,
     message: str,
     sent_messages: set[str],
+    props: dict[str, object] | None = None,
 ) -> None:
-    if message in sent_messages:
+    if props is None and message in sent_messages:
         return
-    await client.update_post(post_id=post_id, message=message)
+    if props is None:
+        await client.update_post(post_id=post_id, message=message)
+    else:
+        await client.update_post(post_id=post_id, message=message, props=props)
     sent_messages.add(message)
 
 

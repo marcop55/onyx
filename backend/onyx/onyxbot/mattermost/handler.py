@@ -50,6 +50,7 @@ from onyx.onyxbot.mattermost.context import (
 from onyx.onyxbot.mattermost.formatting import (
     format_mattermost_answer as _format_mattermost_answer,
 )
+from onyx.onyxbot.mattermost.interactive import build_mattermost_answer_action_props
 from onyx.onyxbot.mattermost.models import (
     MattermostDeliveryTerminalOutcome,
     MattermostNormalizedEventType,
@@ -109,6 +110,7 @@ class MattermostHandlerConfig:
     instance_id: str = "mattermost"
     mutation_adapter: MattermostMutationAdapter | None = None
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
+    interactive_signing_secret: str | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -535,6 +537,11 @@ async def handle_normalized_mattermost_event(
             packets=packets,
             checkpoint_final=checkpoint_final,
             before_external_update=renew_owner_fence,
+            final_props_factory=_build_final_action_props_factory(
+                config=config,
+                event=event,
+                post_id=post_id,
+            ),
         )
     except MattermostThreadTombstonedError:
         return False
@@ -870,6 +877,40 @@ def _build_mattermost_context(
     if thread_context is None:
         return base_context
     return base_context + "\n\n" + thread_context
+
+
+def _build_final_action_props_factory(
+    *,
+    config: MattermostHandlerConfig,
+    event: NormalizedMattermostEvent,
+    post_id: str,
+) -> Callable[[int, str], dict[str, object] | None] | None:
+    if config.interactive_signing_secret is None:
+        return None
+
+    def final_action_props(
+        message_id: int,
+        final_message: str,
+    ) -> dict[str, object] | None:
+        return build_mattermost_answer_action_props(
+            signing_secret=config.interactive_signing_secret or "",
+            team_id=event.team_id,
+            channel_id=event.channel_id,
+            root_post_id=event.root_post_id,
+            answer_post_id=post_id,
+            answer_message_id=message_id,
+            requester_user_id=event.user_id,
+            sources=_extract_source_lines(final_message),
+        )
+
+    return final_action_props
+
+
+def _extract_source_lines(final_message: str) -> tuple[str, ...]:
+    _, separator, sources_text = final_message.partition("\n\nSources:\n")
+    if not separator:
+        return ()
+    return tuple(line for line in sources_text.splitlines() if line.strip())
 
 
 def _response_root_id(event: NormalizedMattermostEvent) -> str:

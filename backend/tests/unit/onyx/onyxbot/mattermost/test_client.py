@@ -198,6 +198,41 @@ async def test_get_thread_posts_fetches_thread_and_preserves_latest_post_state()
 
 
 @pytest.mark.asyncio
+async def test_update_post_can_attach_mattermost_native_actions() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload={
+                    "id": "post-1",
+                    "channel_id": "channel-1",
+                    "message": "final",
+                    "props": {"attachments": [{"actions": [{"id": "like"}]}]},
+                },
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    post = await client.update_post(
+        post_id="post-1",
+        message="final",
+        props={"attachments": [{"actions": [{"id": "like"}]}]},
+    )
+
+    assert session.requests[0][1]["json"] == {
+        "id": "post-1",
+        "message": "final",
+        "props": {"attachments": [{"actions": [{"id": "like"}]}]},
+    }
+    assert post.props == {"attachments": [{"actions": [{"id": "like"}]}]}
+
+
+@pytest.mark.asyncio
 async def test_is_channel_member_checks_current_membership() -> None:
     session = _FakeSession(
         [

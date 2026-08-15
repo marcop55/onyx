@@ -205,12 +205,21 @@ class MattermostClient:
             return ordered_posts
         return list(posts_by_id.values())
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
         """Update a Mattermost post message."""
+        payload: dict[str, object] = {"id": post_id, "message": message}
+        if props is not None:
+            payload["props"] = props
         response = await self._request_json(
             "PUT",
             f"/api/v4/posts/{post_id}",
-            json={"id": post_id, "message": message},
+            json=payload,
         )
         return _post_from_mapping(cast(Mapping[object, object], response))
 
