@@ -31,6 +31,32 @@ The user identity boundary is:
 - If per-user permissions become required, that is a new authority boundary and is out of
   this issue's scope.
 
+### Controlled mutation boundary
+
+Read/retrieval remains on the existing shared full-corpus path. The mutation
+boundary must not add per-user, per-folder, or role-based retrieval filtering.
+Ordinary members may continue to search, extract, summarize, compare, and use
+thread attachments temporarily.
+
+Every create, overwrite/update, rename/move, delete, or attachment promotion is
+a mutation. The adapter performs a fresh server API lookup for every mutation
+using the trusted sender ID from the Mattermost event. Only the exact current
+Mattermost `system_admin` role authorizes routing. Channel admin and team admin
+roles do not grant mutation authority. Prompt text, usernames, display names,
+event claims, channel claims, and prior role observations never grant authority.
+Lookup failure, identity mismatch, or immediate role removal fails closed before
+tool execution with a clear permission response.
+
+Authorized requests route only through the controlled platform gateway. The
+adapter forwards the trusted Mattermost requester ID, server-resolved username,
+channel, root thread, source post, action, source/destination, origin, explicit
+confirmation, and expected revision. Overwrite, move, and delete require explicit
+confirmation; existing-file mutations require the current expected revision.
+Attachment promotion is a mutation and receives the same current-role check.
+The platform gateway independently re-resolves authority and owns canonical
+Seafile preconditions, mutation, read-back verification, and immutable audit.
+Onyx exposes no direct Seafile mutation transport.
+
 The parity contract is that Slack user-specific behavior maps to shared-scope Mattermost behavior
 unless this document says otherwise.
 

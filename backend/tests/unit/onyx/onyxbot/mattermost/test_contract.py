@@ -195,3 +195,18 @@ def test_contract_defines_credential_and_production_cutover_boundary() -> None:
     assert "No external credential is required to verify this contract" in contract
     assert "must not use the production `@orka`" in contract
     assert "Production bot credentials" in contract
+
+
+def test_contract_defines_current_system_admin_mutation_boundary() -> None:
+    contract = " ".join(_read_contract().split()).lower()
+
+    required_phrases = [
+        "current mattermost `system_admin`",
+        "fresh server api lookup for every mutation",
+        "controlled platform gateway",
+        "channel admin and team admin roles do not grant mutation authority",
+        "attachment promotion is a mutation",
+        "read/retrieval remains on the existing shared full-corpus path",
+    ]
+    for phrase in required_phrases:
+        assert phrase in contract

@@ -414,6 +414,7 @@ def _user_info_from_mapping(mapping: Mapping[object, object]) -> MattermostUserI
         id=_string_value(mapping.get("id")),
         username=username,
         display_name=display_name,
+        roles=_string_value(mapping.get("roles")),
     )
 
 
