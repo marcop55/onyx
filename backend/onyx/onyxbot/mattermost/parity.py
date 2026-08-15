@@ -57,14 +57,26 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="bot_instance_configuration",
         area=SlackCapabilityArea.BOT,
         slack_capability="Dashboard-managed Slack bot tokens and enablement.",
-        mattermost_contract="Deployment-file Mattermost service config for the release PoC; later dashboard CRUD is tracked by issue #31.",
-        status=MattermostParityStatus.POLICY_DIFFERENCE,
+        mattermost_contract="Onyx managed DB/API/admin UI Mattermost bot configuration stores encrypted tokens, enablement, identity, and health state for steady-state operation.",
+        status=MattermostParityStatus.DIRECT_MATTERMOST_FEATURE,
         evidence=(
-            "backend/onyx/onyxbot/mattermost/config.py:MattermostBotConfig",
-            "docs/mattermost-adapter.md:Credential and cutover boundary",
+            "backend/onyx/server/manage/mattermost_bot.py:create_bot",
+            "backend/onyx/server/manage/mattermost_bot.py:patch_bot",
+            "backend/onyx/db/models.py:MattermostBot",
+            "web/src/app/admin/mattermost-bots/page.tsx:MattermostBotsPage",
+            "web/src/app/admin/mattermost-bots/MattermostBotForm.tsx:MattermostBotForm",
+            "backend/tests/external_dependency_unit/mattermost_bot/test_mattermost_bot_crud.py:test_create_route_validates_identity_and_records_health",
         ),
-        guarantees=frozenset({"no_production_credentials", "provider_neutral"}),
-        fallback="Operators configure the disposable test bot outside Onyx until Mattermost dashboard CRUD ships.",
+        guarantees=frozenset(
+            {
+                "encrypted_tokens",
+                "full_admin_panel_access_required",
+                "identity_validated",
+                "provider_neutral",
+                "steady_state_managed_config",
+            }
+        ),
+        fallback="Imported env/deployment values may bootstrap or roll back bot records only; steady-state control remains the Onyx managed DB/API/admin UI.",
     ),
     SlackToMattermostCapability(
         key="channel_agent_configuration",
