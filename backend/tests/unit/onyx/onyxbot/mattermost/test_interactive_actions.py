@@ -59,11 +59,26 @@ def _payload(value: str, *, user_id: str = "user-1") -> dict[str, object]:
     }
 
 
+def _mattermost_action_payload(
+    action_payload: dict[str, object], *, user_id: str = "user-1"
+) -> dict[str, object]:
+    integration = cast(dict[str, object], action_payload["integration"])
+    context = cast(dict[str, object], integration["context"])
+    assert context["action_value"]
+    return {
+        "user_id": user_id,
+        "channel_id": "channel-1",
+        "post_id": "answer-post-1",
+        "context": context,
+    }
+
+
 def _action_value(
     action: MattermostInteractiveAction, *, user_id: str = "user-1"
 ) -> str:
     props = build_mattermost_answer_action_props(
         signing_secret="secret",
+        interactive_url="http://127.0.0.1:8091/interactive",
         channel_id="channel-1",
         root_post_id="root-1",
         answer_post_id="answer-post-1",
@@ -76,9 +91,9 @@ def _action_value(
     actions = cast(list[dict[str, object]], attachments[0]["actions"])
     for action_payload in actions:
         if action_payload["id"] == action.value:
-            return cast(
-                str, cast(dict[str, object], action_payload["context"])["action_value"]
-            )
+            integration = cast(dict[str, object], action_payload["integration"])
+            context = cast(dict[str, object], integration["context"])
+            return cast(str, context["action_value"])
     raise AssertionError(f"missing {action}")
 
 
@@ -122,11 +137,20 @@ def test_answer_action_buttons_are_wired_to_interactive_endpoint() -> None:
     actions = cast(list[dict[str, object]], attachments[0]["actions"])
 
     assert actions != []
-    assert all(
-        cast(dict[str, object], action["integration"])["url"]
-        == "http://127.0.0.1:8091/interactive"
-        for action in actions
-    )
+    for action in actions:
+        assert "context" not in action
+        integration = cast(dict[str, object], action["integration"])
+        assert integration["url"] == "http://127.0.0.1:8091/interactive"
+        context = cast(dict[str, object], integration["context"])
+        assert context["action_value"]
+        parsed = parse_mattermost_interactive_payload(
+            _mattermost_action_payload(action),
+            signing_secret="secret",
+        )
+        assert parsed.action.value == action["id"]
+        assert parsed.user_id == "user-1"
+        assert parsed.channel_id == "channel-1"
+        assert parsed.answer_post_id == "answer-post-1"
 
 
 @pytest.mark.asyncio

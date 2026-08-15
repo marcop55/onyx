@@ -387,29 +387,31 @@ def _button(
     sources: tuple[str, ...],
     mutation_command: str | None = None,
 ) -> dict[str, object]:
+    context = {
+        "action_value": _signed_value(
+            {
+                "action": action.value,
+                "team_id": team_id,
+                "channel_id": channel_id,
+                "root_post_id": root_post_id,
+                "answer_post_id": answer_post_id,
+                "answer_message_id": answer_message_id,
+                "user_id": requester_user_id,
+                "sources": list(sources),
+                "mutation_command": mutation_command,
+            },
+            signing_secret,
+        )
+    }
+    integration: dict[str, object] = {"context": context}
+    if interactive_url is not None:
+        integration["url"] = interactive_url
     button: dict[str, object] = {
         "id": action.value,
         "name": name,
         "type": "button",
-        "context": {
-            "action_value": _signed_value(
-                {
-                    "action": action.value,
-                    "team_id": team_id,
-                    "channel_id": channel_id,
-                    "root_post_id": root_post_id,
-                    "answer_post_id": answer_post_id,
-                    "answer_message_id": answer_message_id,
-                    "user_id": requester_user_id,
-                    "sources": list(sources),
-                    "mutation_command": mutation_command,
-                },
-                signing_secret,
-            )
-        },
+        "integration": integration,
     }
-    if interactive_url is not None:
-        button["integration"] = {"url": interactive_url}
     return button
 
 
@@ -489,6 +491,17 @@ def _action_value_from_payload(payload: dict[str, object]) -> str:
                 value = action_context_mapping.get("action_value")
                 if isinstance(value, str):
                     return value
+            integration = action_mapping.get("integration")
+            if isinstance(integration, Mapping):
+                integration_mapping = cast(Mapping[object, object], integration)
+                integration_context = integration_mapping.get("context")
+                if isinstance(integration_context, Mapping):
+                    integration_context_mapping = cast(
+                        Mapping[object, object], integration_context
+                    )
+                    value = integration_context_mapping.get("action_value")
+                    if isinstance(value, str):
+                        return value
             value = action_mapping.get("value")
             if isinstance(value, str):
                 return value
