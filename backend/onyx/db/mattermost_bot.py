@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from onyx.db.chat import create_chat_session, get_or_create_root_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.models import (
+    AllowedAnswerFilters,
     ChannelConfig,
     ChatSession,
     MattermostAttachment,
@@ -90,12 +91,18 @@ def _default_mattermost_channel_config(
     channel_name: str | None,
     respond_tag_only: bool = True,
     response_style: str = "orka_concise",
+    response_type: str = "citations",
+    include_source_previews: bool = False,
+    answer_filters: list[AllowedAnswerFilters] | None = None,
     disabled: bool = False,
 ) -> ChannelConfig:
     return {
         "channel_name": channel_name,
         "respond_tag_only": respond_tag_only,
         "response_style": response_style,
+        "response_type": response_type,
+        "include_source_previews": include_source_previews,
+        "answer_filters": answer_filters or [],
         "disabled": disabled,
     }
 

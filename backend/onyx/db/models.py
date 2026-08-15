@@ -4535,6 +4535,8 @@ class ChannelConfig(TypedDict):
     show_continue_in_web_ui: NotRequired[bool]  # defaults to False
     disabled: NotRequired[bool]  # defaults to False
     response_style: NotRequired[str]
+    response_type: NotRequired[str]
+    include_source_previews: NotRequired[bool]
 
 
 class SlackChannelConfig(Base):

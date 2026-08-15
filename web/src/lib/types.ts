@@ -488,7 +488,9 @@ export interface ChannelConfig {
   answer_filters?: AnswerFilterOption[];
   follow_up_tags?: string[];
   disabled?: boolean;
-  response_style?: "default" | "orka_concise";
+  response_style?: "default" | "orka_concise" | "detailed";
+  response_type?: "citations" | "quotes";
+  include_source_previews?: boolean;
 }
 
 export type SlackBotResponseType = "quotes" | "citations";

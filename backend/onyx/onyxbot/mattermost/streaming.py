@@ -26,6 +26,7 @@ MATTERMOST_STREAM_PLACEHOLDER = "..."
 MATTERMOST_STREAM_FAILURE_SUFFIX = (
     "Onyx stopped before it finished this answer. Try again later."
 )
+MATTERMOST_NO_CITATIONS_MESSAGE = "Found no citations or quotes when trying to answer."
 MATTERMOST_MIN_UPDATE_CHARS = 80
 
 
@@ -93,6 +94,9 @@ async def stream_mattermost_answer(
     checkpoint_final: Callable[[str, int], None] | None = None,
     before_external_update: Callable[[], bool] | None = None,
     min_update_chars: int = MATTERMOST_MIN_UPDATE_CHARS,
+    response_type: str = "citations",
+    include_source_previews: bool = False,
+    require_citations: bool = False,
 ) -> MattermostStreamResult:
     """Create or resume one Mattermost post and update it from Onyx packets."""
 
@@ -166,16 +170,21 @@ async def stream_mattermost_answer(
         )
         raise MattermostStreamVisibleError("Message ID is required")
 
-    final_message = format_mattermost_answer(
-        ChatBasicResponse(
-            answer=answer,
-            answer_citationless=answer,
-            top_documents=top_documents,
-            error_msg=None,
-            message_id=message_id,
-            citation_info=citations,
+    if require_citations and not citations:
+        final_message = MATTERMOST_NO_CITATIONS_MESSAGE
+    else:
+        final_message = format_mattermost_answer(
+            ChatBasicResponse(
+                answer=answer,
+                answer_citationless=answer,
+                top_documents=top_documents,
+                error_msg=None,
+                message_id=message_id,
+                citation_info=citations,
+            ),
+            response_type=response_type,
+            include_source_previews=include_source_previews,
         )
-    )
     if checkpoint_final is not None:
         checkpoint_final(final_message, message_id)
     _require_owner_fence(before_external_update)
@@ -203,6 +212,9 @@ async def stream_mattermost_ephemeral_answer(
     before_ephemeral_delivery: Callable[[], bool] | None = None,
     after_ephemeral_delivery: Callable[[str], bool] | None = None,
     props: dict[str, object] | None = None,
+    response_type: str = "citations",
+    include_source_previews: bool = False,
+    require_citations: bool = False,
 ) -> MattermostStreamResult:
     """Render one Onyx answer and send it as a Mattermost ephemeral post."""
 
@@ -261,16 +273,21 @@ async def stream_mattermost_ephemeral_answer(
         )
         raise MattermostStreamVisibleError("Message ID is required")
 
-    final_message = format_mattermost_answer(
-        ChatBasicResponse(
-            answer=answer,
-            answer_citationless=answer,
-            top_documents=top_documents,
-            error_msg=None,
-            message_id=message_id,
-            citation_info=citations,
+    if require_citations and not citations:
+        final_message = MATTERMOST_NO_CITATIONS_MESSAGE
+    else:
+        final_message = format_mattermost_answer(
+            ChatBasicResponse(
+                answer=answer,
+                answer_citationless=answer,
+                top_documents=top_documents,
+                error_msg=None,
+                message_id=message_id,
+                citation_info=citations,
+            ),
+            response_type=response_type,
+            include_source_previews=include_source_previews,
         )
-    )
     if checkpoint_final is not None:
         checkpoint_final(final_message, message_id)
     post = await _deliver_ephemeral_once(

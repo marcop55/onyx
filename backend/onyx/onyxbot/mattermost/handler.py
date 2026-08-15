@@ -548,6 +548,24 @@ async def handle_normalized_mattermost_event(
             packets=packets,
             checkpoint_final=checkpoint_final,
             before_external_update=renew_owner_fence,
+            response_type=(
+                channel_config.channel_config.get("response_type", "citations")
+                if channel_config is not None
+                else "citations"
+            ),
+            include_source_previews=(
+                bool(
+                    channel_config.channel_config.get("include_source_previews", False)
+                )
+                if channel_config is not None
+                else False
+            ),
+            require_citations=(
+                "well_answered_postfilter"
+                in (channel_config.channel_config.get("answer_filters") or [])
+                if channel_config is not None
+                else False
+            ),
         )
     except MattermostThreadTombstonedError:
         return False
@@ -724,6 +742,8 @@ async def _run_ephemeral_answer(
         packets=packets,
         checkpoint_final=checkpoint_final,
         before_external_update=renew_owner_fence,
+        response_type="citations",
+        include_source_previews=False,
         before_ephemeral_delivery=lambda: checkpoint_mattermost_terminal_outcome(
             db_session,
             event_id=ledger_event.id,
@@ -906,6 +926,14 @@ def _build_mattermost_context(
             "be friendly and concise, lead with the answer, do not restate the "
             "question, use short paragraphs or at most five bullets, expand only "
             "on request, and preserve citations plus safety-critical detail."
+        )
+    elif response_style == "detailed":
+        base_context += (
+            "\nMattermost response style control: selected Onyx Agent Instructions "
+            "remain the only base personality source. For Mattermost delivery, "
+            "provide a detailed answer when useful, keep the structure scannable, "
+            "do not duplicate the user's question, and preserve citations plus "
+            "safety-critical detail."
         )
     if thread_context is None:
         return base_context

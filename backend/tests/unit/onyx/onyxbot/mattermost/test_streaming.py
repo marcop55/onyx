@@ -16,6 +16,7 @@ from onyx.onyxbot.mattermost.models import (
     MattermostUserInfo,
 )
 from onyx.onyxbot.mattermost.streaming import (
+    MATTERMOST_NO_CITATIONS_MESSAGE,
     MATTERMOST_STREAM_FAILURE_SUFFIX,
     MattermostLeaseLostError,
     MattermostStreamResult,
@@ -194,6 +195,33 @@ async def test_stream_existing_post_checkpoints_render_before_final_put() -> Non
     assert checkpoints == [("final answer", 22)]
     assert client.updated_posts == [
         {"post_id": "checkpointed-post", "message": "final answer"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_answer_filter_replaces_uncited_answer_with_no_citations_message() -> (
+    None
+):
+    client = _RecordingClient()
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content="uncited answer")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=100,
+        require_citations=True,
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="bot-post-1")
+    assert client.updated_posts == [
+        {"post_id": "bot-post-1", "message": MATTERMOST_NO_CITATIONS_MESSAGE}
     ]
 
 
@@ -705,6 +733,22 @@ class _RecordingClient:
             root_id=root_id,
             user_id="bot-user-1",
             channel_id=channel_id,
+        )
+
+    async def create_ephemeral_post(
+        self,
+        *,
+        channel_id: str,
+        user_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = user_id, props
+        return await self.create_post(
+            channel_id=channel_id,
+            message=message,
+            root_id=root_id,
         )
 
     async def find_post_by_idempotency_fields(
