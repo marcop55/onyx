@@ -132,6 +132,44 @@ async def test_stream_mattermost_answer_preserves_recovered_keyed_response() -> 
 
 
 @pytest.mark.asyncio
+async def test_stream_mattermost_answer_overrides_empty_channel_filter_results() -> (
+    None
+):
+    client = _RecordingClient()
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=iter(
+            [
+                MessageResponseIDInfo(
+                    user_message_id=10, reserved_assistant_message_id=22
+                ),
+                ChatBasicResponse(
+                    answer="hallucinated answer",
+                    answer_citationless="hallucinated answer",
+                    top_documents=[],
+                    error_msg=None,
+                    message_id=22,
+                    citation_info=[],
+                ),
+            ]
+        ),
+        no_results_message="No indexed data found for #town-square.",
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="checkpointed-post")
+    assert client.updated_posts == [
+        {
+            "post_id": "checkpointed-post",
+            "message": "No indexed data found for #town-square.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_mattermost_answer_updates_one_rooted_post_with_final_citations() -> (
     None
 ):
@@ -704,6 +742,24 @@ class _RecordingClient:
             message=message,
             root_id=root_id,
             user_id="bot-user-1",
+            channel_id=channel_id,
+        )
+
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = props
+        return MattermostPost(
+            id="ephemeral-post-1",
+            message=message,
+            root_id=root_id,
+            user_id=user_id,
             channel_id=channel_id,
         )
 
