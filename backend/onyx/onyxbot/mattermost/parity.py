@@ -294,13 +294,23 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="channel_reference_filtering",
         area=SlackCapabilityArea.SEARCH,
         slack_capability="Slack channel-reference search filtering.",
-        mattermost_contract="Mattermost channel-reference filters require authentic indexed Mattermost history first.",
-        status=MattermostParityStatus.PLATFORM_GAP,
+        mattermost_contract="Mattermost channel references and in:channel syntax resolve through native channel lookup, re-check current bot-and-sender membership, filter retrieval by immutable indexed channel_id tags, and return an explicit no-results response when the filtered indexed corpus has no matches.",
+        status=MattermostParityStatus.DIRECT_MATTERMOST_FEATURE,
         evidence=(
             "backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:resolve_channel_references",
+            "backend/onyx/onyxbot/mattermost/channel_filters.py:resolve_mattermost_channel_filters",
+            "backend/onyx/onyxbot/mattermost/handler.py:_mattermost_channel_search_filters",
+            "backend/onyx/onyxbot/mattermost/streaming.py:stream_mattermost_answer",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_channel_filters.py",
         ),
-        guarantees=frozenset({"no_fake_connectors", "shared_full_corpus"}),
-        fallback="Do not narrow retrieval by unindexed Mattermost channel claims until issue #37 ships.",
+        guarantees=frozenset(
+            {
+                "no_fake_connectors",
+                "membership_fail_closed",
+                "shared_full_corpus",
+                "replay_safe",
+            }
+        ),
     ),
     SlackToMattermostCapability(
         key="complete_thread_context",

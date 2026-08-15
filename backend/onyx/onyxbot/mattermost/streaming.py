@@ -83,6 +83,7 @@ async def stream_mattermost_answer(
     checkpoint_final: Callable[[str, int], None] | None = None,
     before_external_update: Callable[[], bool] | None = None,
     min_update_chars: int = MATTERMOST_MIN_UPDATE_CHARS,
+    no_results_message: str | None = None,
 ) -> MattermostStreamResult:
     """Create or resume one Mattermost post and update it from Onyx packets."""
 
@@ -155,6 +156,9 @@ async def stream_mattermost_answer(
             sent_messages=sent_messages,
         )
         raise MattermostStreamVisibleError("Message ID is required")
+
+    if no_results_message and not top_documents and not citations:
+        answer = no_results_message
 
     final_message = format_mattermost_answer(
         ChatBasicResponse(

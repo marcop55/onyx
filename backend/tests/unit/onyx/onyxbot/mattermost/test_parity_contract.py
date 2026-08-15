@@ -89,6 +89,8 @@ def test_authorization_denial_is_manifested_for_admitted_runtime_paths() -> None
     assert all(
         "backend/onyx/onyxbot/mattermost/listener.py:_authorize_and_attribute_event"
         in entry.evidence
+        or "backend/onyx/onyxbot/mattermost/channel_filters.py:resolve_mattermost_channel_filters"
+        in entry.evidence
         or "backend/onyx/connectors/mattermost/connector.py:MattermostConnector"
         in entry.evidence
         for entry in admitted_runtime_entries
@@ -111,6 +113,7 @@ def test_replay_safe_entries_have_durable_or_idempotent_evidence() -> None:
             evidence.startswith("backend/onyx/db/mattermost_bot.py")
             or evidence.startswith("backend/onyx/onyxbot/mattermost/listener.py")
             or evidence.startswith("backend/onyx/onyxbot/mattermost/handler.py")
+            or evidence.startswith("backend/onyx/onyxbot/mattermost/channel_filters.py")
             or evidence.startswith("backend/onyx/connectors/mattermost/connector.py")
             for evidence in entry.evidence
         )

@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from io import BytesIO
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import select
@@ -15,7 +15,13 @@ from sqlalchemy.orm import Session
 
 from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
-from onyx.configs.constants import FileOrigin, MessageType, QAFeedbackType
+from onyx.configs.constants import (
+    DocumentSource,
+    FileOrigin,
+    MessageType,
+    QAFeedbackType,
+)
+from onyx.context.search.models import BaseFilters
 from onyx.db.chat import TERMINATED_RESPONSE_PLACEHOLDER, get_chat_message
 from onyx.db.enums import UserFileStatus
 from onyx.db.mattermost_bot import (
@@ -45,6 +51,13 @@ from onyx.db.persona import get_persona_by_id
 from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import FileDescriptor
+from onyx.onyxbot.mattermost.channel_filters import (
+    MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+    MattermostChannelFilterClient,
+    MattermostChannelFilterResolutionError,
+    MattermostChannelFilterResult,
+    resolve_mattermost_channel_filters,
+)
 from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.context import (
     MattermostThreadContextFetchError,
@@ -323,6 +336,23 @@ async def handle_normalized_mattermost_event(
                 claim_owner=claim_owner,
             )
 
+        try:
+            channel_filter_result = await resolve_mattermost_channel_filters(
+                event=event,
+                client=cast(MattermostChannelFilterClient, client),
+            )
+        except MattermostChannelFilterResolutionError:
+            await _post_failure(
+                client=client,
+                event=event,
+                message=MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+            )
+            return complete_mattermost_control_event(
+                db_session,
+                event_id=claim.event.id,
+                claim_owner=claim_owner,
+            )
+
         def renew_owner_fence() -> bool:
             return renew_mattermost_event_lease(
                 db_session,
@@ -443,6 +473,7 @@ async def handle_normalized_mattermost_event(
                 thread_context=thread_context.text
                 if thread_context is not None
                 else None,
+                channel_filter_result=channel_filter_result,
             ),
             db_session=db_session,
             event_id=ledger_event.id,
@@ -468,6 +499,7 @@ async def handle_normalized_mattermost_event(
             packets=packets,
             checkpoint_final=checkpoint_final,
             before_external_update=renew_owner_fence,
+            no_results_message=channel_filter_result.no_results_message,
         )
     except MattermostThreadTombstonedError:
         return False
@@ -586,6 +618,7 @@ def _stream_mattermost_answer_packets(
     file_descriptors: list[FileDescriptor],
     external_idempotency_key: str,
     thread_context: str | None = None,
+    channel_filter_result: MattermostChannelFilterResult | None = None,
 ) -> Iterator[AnswerStreamPart]:
     if target.persona_id is None:
         raise ValueError("Mattermost thread mapping is missing persona")
@@ -600,9 +633,12 @@ def _stream_mattermost_answer_packets(
         raise RuntimeError("Mattermost persona is invalid")
 
     new_message_request = SendMessageRequest(
-        message=event.text,
+        message=channel_filter_result.message if channel_filter_result else event.text,
         allowed_tool_ids=None,
         file_descriptors=file_descriptors,
+        internal_search_filters=_mattermost_channel_search_filters(
+            channel_filter_result
+        ),
         deep_research=False,
         origin=MessageOrigin.MATTERMOSTBOT,
         parent_message_id=target.parent_message_id,
@@ -627,6 +663,17 @@ def _stream_mattermost_answer_packets(
             CURRENT_USER_ID_CONTEXTVAR.reset(token)
 
     return _packets()
+
+
+def _mattermost_channel_search_filters(
+    channel_filter_result: MattermostChannelFilterResult | None,
+) -> BaseFilters | None:
+    if channel_filter_result is None or not channel_filter_result.tags:
+        return None
+    return BaseFilters(
+        source_type=[DocumentSource.MATTERMOST],
+        tags=channel_filter_result.tags,
+    )
 
 
 async def _save_mattermost_attachments(

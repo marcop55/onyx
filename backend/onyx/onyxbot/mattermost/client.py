@@ -209,6 +209,15 @@ class MattermostClient:
             and payload.get("user_id") == user_id
         )
 
+    async def get_channel_by_name(
+        self, *, team_id: str, channel_name: str
+    ) -> dict[str, object]:
+        """Resolve a Mattermost channel name within a team."""
+        return await self._request_json(
+            "GET",
+            f"/api/v4/teams/{team_id}/channels/name/{channel_name}",
+        )
+
     async def get_file_info(self, file_id: str) -> MattermostFileInfo:
         """Return Mattermost metadata for one bot-authorized file."""
         response = await self._request_json("GET", f"/api/v4/files/{file_id}/info")
