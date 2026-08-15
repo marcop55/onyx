@@ -4,9 +4,8 @@ import { errorHandlingFetcher } from "@/lib/fetcher";
 import { ADMIN_ROUTES } from "@/lib/admin-routes";
 import { SWR_KEYS } from "@/lib/swr-keys";
 import type { MattermostBot } from "@/lib/types";
-import SettingsLayouts from "@/layouts/settings-layouts";
 import { Button } from "@opal/components";
-import { toast } from "@opal/layouts";
+import { SettingsLayouts, toast } from "@opal/layouts";
 import { useState } from "react";
 import useSWR from "swr";
 import { MattermostBotForm } from "./MattermostBotForm";
@@ -53,12 +52,17 @@ export default function MattermostBotsPage() {
         title={route.title}
         description="Manage encrypted Mattermost bot instances without relying on environment variables as the steady-state control surface."
         rightChildren={
-          <Button onClick={() => setIsCreating(true)}>Add Mattermost Bot</Button>
+          <Button onClick={() => setIsCreating(true)}>
+            Add Mattermost Bot
+          </Button>
         }
       />
       <SettingsLayouts.Body>
         {(isCreating || editingBot) && (
-          <MattermostBotForm existingMattermostBot={editingBot} onSaved={onSaved} />
+          <MattermostBotForm
+            existingMattermostBot={editingBot}
+            onSaved={onSaved}
+          />
         )}
         {isLoading ? (
           <div>Loading Mattermost bots...</div>

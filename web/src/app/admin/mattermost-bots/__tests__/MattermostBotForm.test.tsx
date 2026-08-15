@@ -32,12 +32,18 @@ test("creates a Mattermost bot through the managed API without leaking the token
   } as Response);
 
   render(<MattermostBotForm onSaved={onSaved} />);
-  await user.type(screen.getByLabelText(/mattermost bot name/i), "prod mattermost");
+  await user.type(
+    screen.getByLabelText(/mattermost bot name/i),
+    "prod mattermost"
+  );
   await user.type(
     screen.getByLabelText(/mattermost server url/i),
     "https://mattermost.example.com"
   );
-  await user.type(screen.getByLabelText(/mattermost bot token/i), "secret-token");
+  await user.type(
+    screen.getByLabelText(/mattermost bot token/i),
+    "secret-token"
+  );
   await user.click(screen.getByRole("button", { name: /create/i }));
 
   await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
@@ -53,7 +59,9 @@ test("creates a Mattermost bot through the managed API without leaking the token
       }),
     })
   );
-  await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ token: "" })));
+  await waitFor(() =>
+    expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ token: "" }))
+  );
 });
 
 test("updates Mattermost bot metadata without rotating token when the token field is blank", async () => {
@@ -92,7 +100,7 @@ test("updates Mattermost bot metadata without rotating token when the token fiel
 
   await user.clear(screen.getByLabelText(/mattermost bot name/i));
   await user.type(screen.getByLabelText(/mattermost bot name/i), "renamed");
-  await user.click(screen.getByLabelText(/enabled/i));
+  await user.click(screen.getByRole("checkbox", { name: "Enabled" }));
   await user.click(screen.getByRole("button", { name: /update/i }));
 
   await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));

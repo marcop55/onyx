@@ -22,7 +22,10 @@ interface MattermostBotFormProps {
 
 const MATTERMOST_BOTS_URL = "/api/manage/admin/mattermost-app/bots";
 
-function requestBody(values: MattermostBotFormValues, isUpdate: boolean): string {
+function requestBody(
+  values: MattermostBotFormValues,
+  isUpdate: boolean
+): string {
   return JSON.stringify({
     name: values.name,
     url: values.url,
@@ -108,7 +111,10 @@ export function MattermostBotForm({
           <div className="flex justify-end w-full">
             <Button
               disabled={
-                isSubmitting || !values.name || !values.url || (!isUpdate && !values.token)
+                isSubmitting ||
+                !values.name ||
+                !values.url ||
+                (!isUpdate && !values.token)
               }
               type="submit"
             >

@@ -77,8 +77,12 @@ export function MattermostBotTable({
         ))}
         {sortedBots.length === 0 && (
           <TableRow>
-            <TableCell colSpan={6} className="text-center text-muted-foreground">
-              Add a Mattermost bot to start handling Mattermost messages with Onyx.
+            <TableCell
+              colSpan={6}
+              className="text-center text-muted-foreground"
+            >
+              Add a Mattermost bot to start handling Mattermost messages with
+              Onyx.
             </TableCell>
           </TableRow>
         )}
