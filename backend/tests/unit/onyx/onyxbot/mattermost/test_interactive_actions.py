@@ -79,7 +79,10 @@ def _mattermost_action_payload(
 
 
 def _action_value(
-    action: MattermostInteractiveAction, *, user_id: str = "user-1"
+    action: MattermostInteractiveAction,
+    *,
+    user_id: str = "user-1",
+    proposal_identity: str | None = None,
 ) -> str:
     props = build_mattermost_answer_action_props(
         signing_secret="secret",
@@ -91,6 +94,7 @@ def _action_value(
         requester_user_id=user_id,
         sources=("[1] handbook - https://example.test/handbook",),
         mutation_command='@onyx-mutate {"confirmed":true}',
+        mutation_proposal_identity=proposal_identity,
     )
     attachments = cast(list[dict[str, object]], props["attachments"])
     actions = cast(list[dict[str, object]], attachments[0]["actions"])
@@ -126,6 +130,23 @@ def test_signed_control_values_are_identity_bound_and_tamper_evident() -> None:
             _payload(value, user_id="user-2"),
             signing_secret="secret",
         )
+
+
+def test_confirm_mutation_control_binds_persisted_proposal_identity() -> None:
+    value = _action_value(
+        MattermostInteractiveAction.CONFIRM_MUTATION,
+        proposal_identity="c" * 64,
+    )
+
+    parsed = parse_mattermost_interactive_payload(
+        _payload(value),
+        signing_secret="secret",
+    )
+
+    assert parsed.mutation_proposal_identity == "c" * 64
+    assert parsed.dedupe_key == (
+        "interactive:confirm_mutation:answer-post-1:user-1:" + "c" * 64
+    )
 
 
 def test_answer_action_buttons_are_wired_to_interactive_endpoint() -> None:
@@ -375,6 +396,113 @@ async def test_confirm_mutation_replay_does_not_duplicate_gateway_dispatch() -> 
 
     assert len(mutation_calls) == 1
     assert completed_claims == [(1, "owner-1")]
+    assert [post["message"] for post in client.ephemeral_posts] == [
+        MATTERMOST_INTERACTIVE_REPLAY_MESSAGE
+    ]
+
+
+@pytest.mark.asyncio
+async def test_confirm_attachment_promotion_claims_persisted_proposal_before_dispatch() -> (
+    None
+):
+    value = _action_value(
+        MattermostInteractiveAction.CONFIRM_MUTATION,
+        proposal_identity="d" * 64,
+    )
+    client = InteractiveClient(
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        )
+    )
+    promotion_claims: list[tuple[str, str]] = []
+    mutation_calls: list[dict[str, object]] = []
+
+    result = await handle_mattermost_interactive_action(
+        payload=_payload(value),
+        signing_secret="secret",
+        bot_user_id="bot-1",
+        client=client,
+        db_session=object(),
+        dispatch_mutation=lambda **kwargs: mutation_calls.append(kwargs) or True,
+        claim_mutation=lambda *_args, **_kwargs: (1, "owner-1"),
+        complete_mutation=lambda *_args, **_kwargs: True,
+        claim_promotion=lambda _db_session, *, proposal_identity, confirmer_user_id: (
+            promotion_claims.append((proposal_identity, confirmer_user_id)) or object()
+        ),
+    )
+
+    assert result is MattermostInteractiveActionResult.COMPLETED
+    assert promotion_claims == [("d" * 64, "user-1")]
+    assert len(mutation_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_confirm_attachment_promotion_dispatches_claimed_proposal_once() -> None:
+    value = _action_value(
+        MattermostInteractiveAction.CONFIRM_MUTATION,
+        proposal_identity="f" * 64,
+    )
+    client = InteractiveClient(
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        )
+    )
+    claimed_proposal = object()
+    promotion_calls: list[dict[str, object]] = []
+
+    result = await handle_mattermost_interactive_action(
+        payload=_payload(value),
+        signing_secret="secret",
+        bot_user_id="bot-1",
+        client=client,
+        db_session=object(),
+        dispatch_promotion=lambda **kwargs: promotion_calls.append(kwargs) or True,
+        claim_mutation=lambda *_args, **_kwargs: (1, "owner-1"),
+        complete_mutation=lambda *_args, **_kwargs: True,
+        claim_promotion=lambda *_args, **_kwargs: claimed_proposal,
+    )
+
+    assert result is MattermostInteractiveActionResult.COMPLETED
+    assert len(promotion_calls) == 1
+    assert promotion_calls[0]["proposal"] is claimed_proposal
+    event = cast(Any, promotion_calls[0]["event"])
+    assert event.dedupe_key.endswith("f" * 64)
+
+
+@pytest.mark.asyncio
+async def test_confirm_attachment_promotion_replay_stops_before_dispatch() -> None:
+    value = _action_value(
+        MattermostInteractiveAction.CONFIRM_MUTATION,
+        proposal_identity="e" * 64,
+    )
+    client = InteractiveClient(
+        identity=MattermostUserInfo(
+            id="user-1",
+            username="admin",
+            display_name="Admin",
+            roles="system_user system_admin",
+        )
+    )
+    mutation_calls: list[dict[str, object]] = []
+
+    result = await handle_mattermost_interactive_action(
+        payload=_payload(value),
+        signing_secret="secret",
+        bot_user_id="bot-1",
+        client=client,
+        db_session=object(),
+        dispatch_mutation=lambda **kwargs: mutation_calls.append(kwargs) or True,
+        claim_promotion=lambda *_args, **_kwargs: None,
+    )
+
+    assert result is MattermostInteractiveActionResult.REPLAYED
+    assert mutation_calls == []
     assert [post["message"] for post in client.ephemeral_posts] == [
         MATTERMOST_INTERACTIVE_REPLAY_MESSAGE
     ]

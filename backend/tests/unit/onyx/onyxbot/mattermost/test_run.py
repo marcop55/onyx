@@ -14,6 +14,10 @@ from onyx.onyxbot.mattermost.models import (
     MattermostNormalizedEventType,
     NormalizedMattermostEvent,
 )
+from onyx.onyxbot.mattermost.placement import (
+    APPROVED_ONEQODE_ROOTS,
+    SeafileHierarchyEvidence,
+)
 
 
 def test_main_initializes_sql_engine_before_starting_uvicorn(monkeypatch: Any) -> None:
@@ -243,12 +247,280 @@ def test_listener_runtime_reloads_managed_private_answer_channels_per_event(
     ] == [frozenset({"channel-public-1"}), frozenset({"channel-private-1"})]
 
 
+def test_listener_initializes_attachment_hierarchy_before_first_event(
+    monkeypatch: Any,
+) -> None:
+    captured_hierarchies: list[SeafileHierarchyEvidence | None] = []
+    config = _listener_config(mutation_gateway_factory="tests.fake_gateway:create")
+    hierarchy = _hierarchy("revision-current")
+
+    class FakeMattermostClient(_FakeMattermostClient):
+        pass
+
+    class FakeBridge:
+        def get_mattermost_attachment_placement_hierarchy(
+            self,
+        ) -> SeafileHierarchyEvidence:
+            return hierarchy
+
+    class FakeMattermostEventListener:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def normalized_events(self) -> AsyncIterator[NormalizedMattermostEvent]:
+            yield _event("channel-public-1")
+
+    async def fake_handle_normalized_mattermost_event(**kwargs: object) -> bool:
+        handler_config = cast(MattermostHandlerConfig, kwargs["config"])
+        assert handler_config.attachment_placement_hierarchy_provider is not None
+        captured_hierarchies.append(
+            handler_config.attachment_placement_hierarchy_provider(
+                cast(NormalizedMattermostEvent, kwargs["event"])
+            )
+        )
+        raise asyncio.CancelledError
+
+    _patch_listener_runtime(
+        monkeypatch,
+        client_cls=FakeMattermostClient,
+        listener_cls=FakeMattermostEventListener,
+        bridge=FakeBridge(),
+        handle_event=fake_handle_normalized_mattermost_event,
+    )
+
+    try:
+        run.asyncio.run(run._run_bot(config))
+    except asyncio.CancelledError:
+        pass
+
+    assert captured_hierarchies == [hierarchy]
+
+
+def test_listener_ready_waits_for_initial_attachment_hierarchy_refresh(
+    monkeypatch: Any,
+) -> None:
+    captured_ready_states: list[bool] = []
+    ready_event = asyncio.Event()
+    config = _listener_config(mutation_gateway_factory="tests.fake_gateway:create")
+
+    class FakeBridge:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_mattermost_attachment_placement_hierarchy(
+            self,
+        ) -> SeafileHierarchyEvidence:
+            self.calls += 1
+            captured_ready_states.append(ready_event.is_set())
+            return _hierarchy(f"revision-{self.calls}")
+
+    class FakeMattermostEventListener:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def normalized_events(self) -> AsyncIterator[NormalizedMattermostEvent]:
+            yield _event("channel-public-1")
+
+    async def fake_handle_normalized_mattermost_event(**_kwargs: object) -> bool:
+        raise asyncio.CancelledError
+
+    _patch_listener_runtime(
+        monkeypatch,
+        client_cls=_FakeMattermostClient,
+        listener_cls=FakeMattermostEventListener,
+        bridge=FakeBridge(),
+        handle_event=fake_handle_normalized_mattermost_event,
+    )
+
+    try:
+        run.asyncio.run(run._run_bot(config, ready_event))
+    except asyncio.CancelledError:
+        pass
+
+    assert captured_ready_states[0] is False
+    assert ready_event.is_set()
+
+
+def test_listener_refreshes_attachment_hierarchy_on_bounded_cadence(
+    monkeypatch: Any,
+) -> None:
+    captured_revisions: list[str | None] = []
+    config = _listener_config(mutation_gateway_factory="tests.fake_gateway:create")
+    monkeypatch.setattr(
+        run,
+        "MATTERMOST_ATTACHMENT_PLACEMENT_HIERARCHY_REFRESH_SECONDS",
+        0.001,
+    )
+
+    class FakeBridge:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_mattermost_attachment_placement_hierarchy(
+            self,
+        ) -> SeafileHierarchyEvidence:
+            self.calls += 1
+            return _hierarchy(f"revision-{self.calls}")
+
+    class FakeMattermostEventListener:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def normalized_events(self) -> AsyncIterator[NormalizedMattermostEvent]:
+            yield _event("channel-public-1")
+            await asyncio.sleep(0.01)
+            yield _event("channel-public-2")
+
+    async def fake_handle_normalized_mattermost_event(**kwargs: object) -> bool:
+        handler_config = cast(MattermostHandlerConfig, kwargs["config"])
+        assert handler_config.attachment_placement_hierarchy_provider is not None
+        hierarchy = handler_config.attachment_placement_hierarchy_provider(
+            cast(NormalizedMattermostEvent, kwargs["event"])
+        )
+        captured_revisions.append(hierarchy.root_revision if hierarchy else None)
+        if len(captured_revisions) == 2:
+            raise asyncio.CancelledError
+        return True
+
+    _patch_listener_runtime(
+        monkeypatch,
+        client_cls=_FakeMattermostClient,
+        listener_cls=FakeMattermostEventListener,
+        bridge=FakeBridge(),
+        handle_event=fake_handle_normalized_mattermost_event,
+    )
+
+    try:
+        run.asyncio.run(run._run_bot(config))
+    except asyncio.CancelledError:
+        pass
+
+    assert captured_revisions[0] == "revision-1"
+    assert captured_revisions[1] not in {None, "revision-1"}
+
+
+def test_listener_fails_closed_when_initial_attachment_hierarchy_is_unavailable(
+    monkeypatch: Any,
+) -> None:
+    handled_events: list[NormalizedMattermostEvent] = []
+    ready_event = asyncio.Event()
+    config = _listener_config(mutation_gateway_factory="tests.fake_gateway:create")
+
+    class FakeBridge:
+        def get_mattermost_attachment_placement_hierarchy(self) -> None:
+            return None
+
+    class FakeMattermostEventListener:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def normalized_events(self) -> AsyncIterator[NormalizedMattermostEvent]:
+            yield _event("channel-public-1")
+
+    async def fake_handle_normalized_mattermost_event(**kwargs: object) -> bool:
+        handled_events.append(cast(NormalizedMattermostEvent, kwargs["event"]))
+        return True
+
+    _patch_listener_runtime(
+        monkeypatch,
+        client_cls=_FakeMattermostClient,
+        listener_cls=FakeMattermostEventListener,
+        bridge=FakeBridge(),
+        handle_event=fake_handle_normalized_mattermost_event,
+    )
+
+    try:
+        run.asyncio.run(run._run_bot(config, ready_event))
+    except RuntimeError as error:
+        assert str(error) == "Mattermost attachment placement hierarchy is unavailable"
+    else:
+        raise AssertionError(
+            "listener accepted events without initial hierarchy evidence"
+        )
+
+    assert not ready_event.is_set()
+    assert handled_events == []
+
+
 class _DbContext:
     def __enter__(self) -> MagicMock:
         return MagicMock()
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+class _FakeMattermostClient:
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    async def __aenter__(self) -> "_FakeMattermostClient":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def get_me(self) -> object:
+        return object()
+
+
+def _listener_config(
+    *, mutation_gateway_factory: str | None = None
+) -> MattermostBotConfig:
+    return MattermostBotConfig(
+        persona_id=7,
+        url="https://mattermost.example.test",
+        token="mattermost-token",
+        request_timeout_seconds=30,
+        mutation_gateway_factory=mutation_gateway_factory,
+        listener_config=MattermostListenerConfig(
+            bot_user_id="bot-user-1",
+            bot_mentions=frozenset({"@onyx"}),
+        ),
+    )
+
+
+def _patch_listener_runtime(
+    monkeypatch: Any,
+    *,
+    client_cls: type[object],
+    listener_cls: type[object],
+    bridge: object,
+    handle_event: Any,
+) -> None:
+    monkeypatch.setattr(run, "MattermostClient", client_cls)
+    monkeypatch.setattr(run, "MattermostEventListener", listener_cls)
+    monkeypatch.setattr(
+        run.AuthoritativePlatformGatewayBridge,
+        "from_factory_spec",
+        lambda _factory_spec: bridge,
+    )
+    monkeypatch.setattr(run, "_build_handler_config", _fake_build_handler_config)
+    monkeypatch.setattr(run, "handle_normalized_mattermost_event", handle_event)
+    monkeypatch.setattr(run, "hydrate_mattermost_listener_config", lambda *_args: None)
+    monkeypatch.setattr(run, "get_session_with_current_tenant", lambda: _DbContext())
+
+
+def _fake_build_handler_config(
+    config: MattermostBotConfig,
+    _db_session: object,
+) -> MattermostHandlerConfig:
+    return MattermostHandlerConfig(
+        persona_id=config.persona_id,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+    )
+
+
+def _hierarchy(root_revision: str) -> SeafileHierarchyEvidence:
+    return SeafileHierarchyEvidence(
+        library_id="repo1",
+        library_name="OneQode",
+        root_path="/",
+        root_revision=root_revision,
+        approved_roots=APPROVED_ONEQODE_ROOTS,
+        files=(),
+    )
 
 
 def _event(channel_id: str) -> NormalizedMattermostEvent:

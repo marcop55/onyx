@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -37,6 +38,7 @@ from onyx.onyxbot.mattermost.config import (
 )
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
+    dispatch_mattermost_attachment_promotion,
     dispatch_mattermost_mutation,
     handle_normalized_mattermost_event,
 )
@@ -47,9 +49,15 @@ from onyx.onyxbot.mattermost.mutations import (
     AuthoritativePlatformGatewayBridge,
     MattermostMutationAdapter,
 )
+from onyx.onyxbot.mattermost.placement import (
+    SeafileHierarchyEvidence,
+    _validate_hierarchy,
+)
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
+
+MATTERMOST_ATTACHMENT_PLACEMENT_HIERARCHY_REFRESH_SECONDS = 60
 
 
 def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
@@ -187,6 +195,7 @@ async def _handle_interactive_action_request(
         request_timeout_seconds=config.request_timeout_seconds,
     ) as client:
         mutation_adapter: MattermostMutationAdapter | None = None
+        bridge: AuthoritativePlatformGatewayBridge | None = None
         if config.mutation_gateway_factory is not None:
             bridge = AuthoritativePlatformGatewayBridge.from_factory_spec(
                 config.mutation_gateway_factory
@@ -201,6 +210,42 @@ async def _handle_interactive_action_request(
                 client=client,
                 adapter=mutation_adapter,
             )
+
+        async def dispatch_confirmed_promotion(
+            *, event: NormalizedMattermostEvent, proposal: object
+        ) -> bool:
+            active_bridge = bridge
+            with get_session_with_current_tenant() as db_session:
+                handler_config = replace(
+                    _build_handler_config(config, db_session),
+                    mutation_adapter=mutation_adapter,
+                    mutation_gateway=active_bridge,
+                    attachment_placement_hierarchy_provider=(
+                        lambda _event: cast(
+                            SeafileHierarchyEvidence | None,
+                            active_bridge.get_mattermost_attachment_placement_hierarchy(),
+                        )
+                    )
+                    if active_bridge is not None
+                    else None,
+                    attachment_promotion_read_back=(
+                        active_bridge.read_mattermost_attachment_promotion_destination
+                        if active_bridge is not None
+                        else None
+                    ),
+                    attachment_promotion_freshness_check=(
+                        active_bridge.get_mattermost_attachment_promotion_freshness
+                        if active_bridge is not None
+                        else None
+                    ),
+                )
+                return await dispatch_mattermost_attachment_promotion(
+                    event=event,
+                    proposal=proposal,
+                    client=client,
+                    db_session=db_session,
+                    config=handler_config,
+                )
 
         with get_session_with_current_tenant() as db_session:
             channel_config_model = fetch_mattermost_channel_config_for_bot_and_channel(
@@ -222,6 +267,7 @@ async def _handle_interactive_action_request(
                     if channel_config_model is not None
                     else None
                 ),
+                dispatch_promotion=dispatch_confirmed_promotion,
             )
     return JSONResponse(status_code=200, content={"text": ""})
 
@@ -253,26 +299,87 @@ async def _run_bot(
     ) as client:
         await client.get_me()
         mutation_adapter = None
+        hierarchy_refresh_task: asyncio.Task[None] | None = None
+        attachment_placement_hierarchy_provider: (
+            Callable[[NormalizedMattermostEvent], SeafileHierarchyEvidence | None]
+            | None
+        ) = None
         if config.mutation_gateway_factory is not None:
             bridge = AuthoritativePlatformGatewayBridge.from_factory_spec(
                 config.mutation_gateway_factory
             )
             mutation_adapter = MattermostMutationAdapter(client, bridge)
-        listener = MattermostEventListener(client, listener_config)
-        if ready_event is not None:
-            ready_event.set()
-        async for event in listener.normalized_events():
-            with get_session_with_current_tenant() as db_session:
-                handler_config = replace(
-                    _build_handler_config(config, db_session),
-                    mutation_adapter=mutation_adapter,
-                )
-                await handle_normalized_mattermost_event(
-                    event=event,
-                    config=handler_config,
-                    client=client,
-                    db_session=db_session,
-                )
+            cached_attachment_placement_hierarchy = (
+                _fetch_current_attachment_placement_hierarchy(bridge)
+            )
+
+            async def refresh_attachment_placement_hierarchy() -> None:
+                nonlocal cached_attachment_placement_hierarchy
+                while True:
+                    await asyncio.sleep(
+                        MATTERMOST_ATTACHMENT_PLACEMENT_HIERARCHY_REFRESH_SECONDS
+                    )
+                    try:
+                        cached_attachment_placement_hierarchy = (
+                            _fetch_current_attachment_placement_hierarchy(bridge)
+                        )
+                    except RuntimeError:
+                        logger.exception(
+                            "Mattermost attachment hierarchy refresh failed; retaining last valid snapshot"
+                        )
+
+            hierarchy_refresh_task = asyncio.create_task(
+                refresh_attachment_placement_hierarchy()
+            )
+
+            def bridge_attachment_placement_hierarchy_provider(
+                _event: NormalizedMattermostEvent,
+            ) -> SeafileHierarchyEvidence | None:
+                return cached_attachment_placement_hierarchy
+
+            attachment_placement_hierarchy_provider = (
+                bridge_attachment_placement_hierarchy_provider
+            )
+        try:
+            listener = MattermostEventListener(client, listener_config)
+            if ready_event is not None:
+                ready_event.set()
+            async for event in listener.normalized_events():
+                with get_session_with_current_tenant() as db_session:
+                    handler_config = replace(
+                        _build_handler_config(config, db_session),
+                        mutation_adapter=mutation_adapter,
+                        attachment_placement_hierarchy_provider=(
+                            attachment_placement_hierarchy_provider
+                        ),
+                    )
+                    await handle_normalized_mattermost_event(
+                        event=event,
+                        config=handler_config,
+                        client=client,
+                        db_session=db_session,
+                    )
+        finally:
+            if hierarchy_refresh_task is not None:
+                hierarchy_refresh_task.cancel()
+
+
+def _fetch_current_attachment_placement_hierarchy(
+    bridge: AuthoritativePlatformGatewayBridge,
+) -> SeafileHierarchyEvidence:
+    hierarchy = cast(
+        SeafileHierarchyEvidence | None,
+        bridge.get_mattermost_attachment_placement_hierarchy(),
+    )
+    if type(hierarchy) is not SeafileHierarchyEvidence:
+        raise RuntimeError("Mattermost attachment placement hierarchy is unavailable")
+    try:
+        _validate_hierarchy(hierarchy)
+    except ValueError:
+        raise RuntimeError(
+            "Mattermost attachment placement hierarchy is unavailable"
+        ) from None
+    return hierarchy
 
 
 def _build_managed_channel_config_resolver(

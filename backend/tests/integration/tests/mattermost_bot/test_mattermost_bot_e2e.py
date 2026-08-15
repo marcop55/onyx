@@ -9,6 +9,8 @@ import pytest
 from onyx.chat.models import AnswerStreamPart
 from onyx.configs.constants import DocumentSource
 from onyx.context.search.models import SearchDoc
+from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
+from onyx.db.models import MattermostEventState
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
     handle_normalized_mattermost_event,
@@ -16,10 +18,12 @@ from onyx.onyxbot.mattermost.handler import (
 from onyx.onyxbot.mattermost.listener import MattermostEventNormalizer
 from onyx.onyxbot.mattermost.models import (
     MattermostEventEnvelope,
+    MattermostFileInfo,
     MattermostListenerConfig,
     MattermostNormalizedEventType,
     MattermostPost,
     MattermostReaction,
+    MattermostUserInfo,
 )
 from onyx.onyxbot.mattermost.session import MattermostChatTarget
 from onyx.server.query_and_chat.models import MessageResponseIDInfo
@@ -79,7 +83,8 @@ async def test_mattermost_dm_mention_followup_citations_streaming_and_dedupe() -
     assert (
         mention_event.session_key == "mattermost:channel:team-1:channel-1:root-post-1"
     )
-    assert replayed_mention is None
+    assert replayed_mention is not None
+    assert replayed_mention.dedupe_key == mention_event.dedupe_key
     assert followup_event is not None
     assert (
         followup_event.event_type == MattermostNormalizedEventType.THREAD_REPLY_FOLLOWUP
@@ -108,8 +113,41 @@ async def test_mattermost_dm_mention_followup_citations_streaming_and_dedupe() -
             ],
         ) as mock_stream,
         patch(
-            "onyx.onyxbot.mattermost.handler.update_mattermost_thread_parent_message"
-        ) as mock_update_parent,
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            side_effect=[
+                _processing_claim(event_id=1, pending_post_id="pending-1"),
+                _processing_claim(event_id=2, pending_post_id="pending-2"),
+                _processing_claim(event_id=3, pending_post_id="pending-3"),
+            ],
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_loaded_mattermost_context_post_ids",
+            return_value=frozenset(),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_delivery_mode",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.renew_mattermost_event_lease",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_post",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_turn",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.checkpoint_mattermost_rendered_message",
+            return_value=True,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ) as mock_complete,
     ):
         for event in (dm_event, mention_event, followup_event):
             handled = await handle_normalized_mattermost_event(
@@ -137,11 +175,11 @@ async def test_mattermost_dm_mention_followup_citations_streaming_and_dedupe() -
         "can you expand?",
     ]
     assert [
-        call.kwargs["parent_message_id"] for call in mock_update_parent.call_args_list
+        call.kwargs["answer_post_ids"] for call in mock_complete.call_args_list
     ] == [
-        22,
-        33,
-        44,
+        ("bot-post-1",),
+        ("bot-post-2",),
+        ("bot-post-3",),
     ]
     assert client.created_posts == [
         {"channel_id": "dm-channel-1", "root_id": "", "message": "..."},
@@ -208,9 +246,16 @@ async def test_reaction_feedback_records_message_without_mattermost_credentials(
     assert feedback_event is not None
     assert feedback_event.feedback_message_id == 44
 
-    with patch(
-        "onyx.onyxbot.mattermost.handler.create_chat_message_feedback"
-    ) as mock_feedback:
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=_processing_claim(event_id=1, pending_post_id="pending-1"),
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_feedback_event",
+            return_value=True,
+        ) as mock_feedback,
+    ):
         handled = await handle_normalized_mattermost_event(
             event=feedback_event,
             config=MattermostHandlerConfig(persona_id=456),
@@ -231,12 +276,33 @@ def _listener_config(
     return MattermostListenerConfig(
         bot_user_id=_BOT_USER_ID,
         bot_mentions=frozenset({"@onyx"}),
-        allowed_channel_ids=frozenset({"channel-1"}),
-        allowed_team_ids=frozenset({"team-1"}),
+        allowed_channel_ids=frozenset({"channel-1", "dm-channel-1"}),
+        allowed_team_ids=frozenset({"team-1", "global"}),
         approved_user_ids=frozenset({_APPROVED_USER_ID}),
         owned_thread_root_ids={"root-post-1"},
         owned_answer_post_root_ids={"bot-answer-1": "root-post-1"},
         owned_answer_post_message_ids=owned_answer_post_message_ids or {},
+    )
+
+
+def _processing_claim(
+    *,
+    event_id: int,
+    pending_post_id: str,
+) -> MattermostEventClaim:
+    ledger_event = MattermostEventState(
+        id=event_id,
+        instance_id="mattermost",
+        channel_id="channel-1",
+        dedupe_key=f"event_id:{event_id}",
+        event_type="channel_mention",
+        source_post_id=f"source-post-{event_id}",
+        mattermost_pending_post_id=pending_post_id,
+        state="pending",
+    )
+    claim_owner = UUID("00000000-0000-0000-0000-000000000999")
+    return MattermostEventClaim(
+        MattermostClaimOutcome.PROCESS, ledger_event, claim_owner
     )
 
 
@@ -313,8 +379,8 @@ def _search_doc() -> SearchDoc:
 
 class _RecordingClient:
     def __init__(self) -> None:
-        self.created_posts: list[dict[str, str]] = []
-        self.updated_posts: list[dict[str, str]] = []
+        self.created_posts: list[dict[str, object]] = []
+        self.updated_posts: list[dict[str, object]] = []
 
     async def create_post(
         self,
@@ -322,7 +388,10 @@ class _RecordingClient:
         channel_id: str,
         message: str,
         root_id: str = "",
+        pending_post_id: str | None = None,
+        props: dict[str, object] | None = None,
     ) -> MattermostPost:
+        _ = pending_post_id, props
         post_id = f"bot-post-{len(self.created_posts) + 1}"
         self.created_posts.append(
             {"channel_id": channel_id, "root_id": root_id, "message": message}
@@ -335,7 +404,36 @@ class _RecordingClient:
             channel_id=channel_id,
         )
 
-    async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = user_id, channel_id, message, root_id, props
+        raise AssertionError("unexpected ephemeral post")
+
+    async def find_post_by_idempotency_fields(
+        self,
+        *,
+        channel_id: str,
+        pending_post_id: str,
+        event_key: str,
+    ) -> MattermostPost | None:
+        _ = channel_id, pending_post_id, event_key
+        return None
+
+    async def update_post(
+        self,
+        *,
+        post_id: str,
+        message: str,
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = props
         self.updated_posts.append({"post_id": post_id, "message": message})
         return MattermostPost(
             id=post_id,
@@ -344,3 +442,20 @@ class _RecordingClient:
             user_id=_BOT_USER_ID,
             channel_id="channel-1",
         )
+
+    async def get_file_info(self, file_id: str) -> MattermostFileInfo:
+        raise AssertionError(f"unexpected file-info request: {file_id}")
+
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo:
+        raise AssertionError(f"unexpected user-info request: {user_id}")
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
+        _ = channel_id, user_id
+        return True
+
+    async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]:
+        _ = root_post_id
+        return []
+
+    async def download_file(self, file_id: str) -> bytes:
+        raise AssertionError(f"unexpected file download: {file_id}")
