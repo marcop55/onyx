@@ -56,6 +56,8 @@ def upgrade() -> None:
         sa.Column("ingestion_freshness_proof", sa.String(), nullable=True),
         sa.Column("readback_file_id", sa.String(), nullable=True),
         sa.Column("readback_revision", sa.String(), nullable=True),
+        sa.Column("promotion_confirmer_user_id", sa.String(), nullable=True),
+        sa.Column("promotion_claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "time_created",
             sa.DateTime(timezone=True),

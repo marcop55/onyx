@@ -3568,6 +3568,12 @@ class MattermostAttachmentPlacementProposal(Base):
     ingestion_freshness_proof: Mapped[str | None] = mapped_column(String, nullable=True)
     readback_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
     readback_revision: Mapped[str | None] = mapped_column(String, nullable=True)
+    promotion_confirmer_user_id: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    promotion_claimed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     time_created: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

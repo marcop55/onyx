@@ -253,14 +253,15 @@ async def _run_bot(
                 config.mutation_gateway_factory
             )
             mutation_adapter = MattermostMutationAdapter(client, bridge)
+            cached_attachment_placement_hierarchy = cast(
+                SeafileHierarchyEvidence | None,
+                bridge.get_mattermost_attachment_placement_hierarchy(),
+            )
 
             def bridge_attachment_placement_hierarchy_provider(
                 _event: NormalizedMattermostEvent,
             ) -> SeafileHierarchyEvidence | None:
-                return cast(
-                    SeafileHierarchyEvidence | None,
-                    bridge.get_mattermost_attachment_placement_hierarchy(),
-                )
+                return cached_attachment_placement_hierarchy
 
             attachment_placement_hierarchy_provider = (
                 bridge_attachment_placement_hierarchy_provider

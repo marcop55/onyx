@@ -624,6 +624,41 @@ def record_mattermost_attachment_promotion_receipt(
     return proposal
 
 
+def claim_mattermost_attachment_placement_promotion(
+    db_session: Session,
+    *,
+    proposal_identity: str,
+    confirmer_user_id: str,
+    now: datetime.datetime | None = None,
+) -> MattermostAttachmentPlacementProposal | None:
+    """Fence one signed attachment-promotion confirmation before transport."""
+
+    if not proposal_identity or not confirmer_user_id:
+        raise ValueError("Mattermost attachment promotion identity is required")
+    claim_time = now or datetime.datetime.now(datetime.timezone.utc)
+    proposal = db_session.scalar(
+        select(MattermostAttachmentPlacementProposal)
+        .where(
+            MattermostAttachmentPlacementProposal.proposal_identity == proposal_identity
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if proposal is None:
+        db_session.commit()
+        return None
+    if (
+        proposal.promotion_claimed_at is not None
+        or proposal.readback_file_id is not None
+    ):
+        db_session.commit()
+        return None
+    proposal.promotion_confirmer_user_id = confirmer_user_id
+    proposal.promotion_claimed_at = claim_time
+    db_session.commit()
+    return proposal
+
+
 def mattermost_attachment_placement_proposal_identity(
     proposal: MattermostAttachmentPlacementProposalDTO,
 ) -> str:

@@ -18,6 +18,7 @@ from onyx.configs.constants import QAFeedbackType
 from onyx.db.mattermost_bot import (
     MattermostClaimOutcome,
     claim_durable_mattermost_event,
+    claim_mattermost_attachment_placement_promotion,
     complete_mattermost_control_event,
     complete_mattermost_feedback_event,
     complete_mattermost_interactive_feedback_event,
@@ -68,9 +69,15 @@ class MattermostInteractiveControl:
     user_id: str
     sources: tuple[str, ...] = ()
     mutation_command: str | None = None
+    mutation_proposal_identity: str | None = None
 
     @property
     def dedupe_key(self) -> str:
+        if self.mutation_proposal_identity is not None:
+            return (
+                f"interactive:{self.action.value}:{self.answer_post_id}:"
+                f"{self.user_id}:{self.mutation_proposal_identity}"
+            )
         return f"interactive:{self.action.value}:{self.answer_post_id}:{self.user_id}"
 
 
@@ -94,6 +101,7 @@ FeedbackCompleter = Callable[..., bool]
 MutationDispatcher = Callable[..., bool | object]
 ControlClaimer = Callable[..., tuple[int, Any] | None]
 ControlCompleter = Callable[..., bool]
+PromotionClaimer = Callable[..., object | None]
 
 
 def build_mattermost_answer_action_props(
@@ -108,6 +116,7 @@ def build_mattermost_answer_action_props(
     team_id: str = "global",
     sources: tuple[str, ...] = (),
     mutation_command: str | None = None,
+    mutation_proposal_identity: str | None = None,
 ) -> dict[str, object]:
     """Return Mattermost attachment props containing signed action buttons."""
 
@@ -193,6 +202,7 @@ def build_mattermost_answer_action_props(
                 requester_user_id=requester_user_id,
                 sources=sources,
                 mutation_command=mutation_command,
+                mutation_proposal_identity=mutation_proposal_identity,
             )
         )
     return {"attachments": [{"actions": actions}]}
@@ -236,6 +246,7 @@ async def handle_mattermost_interactive_action(
     dispatch_mutation: MutationDispatcher | None = None,
     claim_mutation: ControlClaimer | None = None,
     complete_mutation: ControlCompleter | None = None,
+    claim_promotion: PromotionClaimer | None = None,
 ) -> MattermostInteractiveActionResult:
     try:
         control = parse_mattermost_interactive_payload(
@@ -268,6 +279,28 @@ async def handle_mattermost_interactive_action(
             return MattermostInteractiveActionResult.UNAUTHORIZED
         if control.mutation_command is None or dispatch_mutation is None:
             return MattermostInteractiveActionResult.REJECTED
+        if control.mutation_proposal_identity is not None:
+            if claim_promotion is None:
+                if not isinstance(db_session, Session):
+                    return MattermostInteractiveActionResult.REJECTED
+                proposal = claim_mattermost_attachment_placement_promotion(
+                    db_session,
+                    proposal_identity=control.mutation_proposal_identity,
+                    confirmer_user_id=control.user_id,
+                )
+            else:
+                proposal = claim_promotion(
+                    db_session,
+                    proposal_identity=control.mutation_proposal_identity,
+                    confirmer_user_id=control.user_id,
+                )
+            if proposal is None:
+                await _post_ephemeral(
+                    client=client,
+                    control=control,
+                    message=MATTERMOST_INTERACTIVE_REPLAY_MESSAGE,
+                )
+                return MattermostInteractiveActionResult.REPLAYED
         claim_mutation = claim_mutation or _claim_control_for_action
         complete_mutation = complete_mutation or _complete_claimed_control
         claim = claim_mutation(db_session, instance_id=instance_id, control=control)
@@ -386,6 +419,7 @@ def _button(
     requester_user_id: str,
     sources: tuple[str, ...],
     mutation_command: str | None = None,
+    mutation_proposal_identity: str | None = None,
 ) -> dict[str, object]:
     context = {
         "action_value": _signed_value(
@@ -399,6 +433,7 @@ def _button(
                 "user_id": requester_user_id,
                 "sources": list(sources),
                 "mutation_command": mutation_command,
+                "mutation_proposal_identity": mutation_proposal_identity,
             },
             signing_secret,
         )
@@ -458,6 +493,7 @@ def _control_from_mapping(mapping: dict[str, object]) -> MattermostInteractiveCo
         else ()
     )
     mutation_command = mapping.get("mutation_command")
+    mutation_proposal_identity = mapping.get("mutation_proposal_identity")
     return MattermostInteractiveControl(
         action=action,
         team_id=_required_string(mapping, "team_id"),
@@ -469,6 +505,9 @@ def _control_from_mapping(mapping: dict[str, object]) -> MattermostInteractiveCo
         sources=sources,
         mutation_command=mutation_command
         if isinstance(mutation_command, str)
+        else None,
+        mutation_proposal_identity=mutation_proposal_identity
+        if isinstance(mutation_proposal_identity, str)
         else None,
     )
 
