@@ -2,6 +2,8 @@ import { test } from "@playwright/test";
 import { MattermostBotsAdminPage } from "@tests/e2e/pages/MattermostBotsAdminPage";
 
 test.describe("Mattermost bot parity admin acceptance", () => {
+  test.use({ storageState: "admin2_auth.json" });
+
   test("surfaces configuration, replay, health, indexing, and fallback controls", async ({
     page,
   }) => {

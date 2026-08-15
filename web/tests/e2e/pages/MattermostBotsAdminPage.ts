@@ -11,6 +11,34 @@ export class MattermostBotsAdminPage {
   constructor(private readonly page: Page) {}
 
   async mockParityRoutes(): Promise<void> {
+    await this.page.route("**/api/settings", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ notifications: [] }),
+      });
+    });
+
+    await this.page.route("**/api/llm/provider", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          providers: [
+            {
+              name: "openai",
+              provider: "openai",
+              model_configurations: [
+                { name: "gpt-4o", is_visible: true, is_default: true },
+              ],
+            },
+          ],
+          default_text: "gpt-4o",
+          default_vision: "gpt-4o",
+        }),
+      });
+    });
+
     await this.page.route(MATTERMOST_BOTS_URL, async (route) => {
       if (route.request().method() === "POST") {
         await route.fulfill({
@@ -151,7 +179,25 @@ export class MattermostBotsAdminPage {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([{ id: 456, name: "Mattermost Agent" }]),
+        body: JSON.stringify([
+          {
+            id: 456,
+            name: "Mattermost Agent",
+            description: "Agent used for Mattermost parity coverage",
+            tools: [],
+            starter_messages: null,
+            document_sets: [],
+            is_public: false,
+            is_listed: true,
+            display_priority: null,
+            is_featured: false,
+            builtin_persona: false,
+            labels: [],
+            owner: null,
+            owner_group: null,
+            user_permission: "OWNER",
+          },
+        ]),
       });
     });
   }
