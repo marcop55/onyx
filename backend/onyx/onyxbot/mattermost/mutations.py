@@ -104,6 +104,7 @@ class AuthoritativePlatformGatewayBridge:
         mutate = getattr(gateway, "mutate", None)
         if not callable(mutate):
             raise ValueError("configured platform gateway must expose mutate")
+        self._gateway = gateway
         required = (
             "MattermostMutationContext",
             "SeafileActionRequest",
@@ -160,6 +161,43 @@ class AuthoritativePlatformGatewayBridge:
             scope_prefix=request.scope_prefix,
         )
         return self._gateway_mutate(platform_context, platform_request)
+
+    def get_mattermost_attachment_placement_hierarchy(self) -> Any | None:
+        hierarchy = getattr(
+            self._gateway,
+            "get_mattermost_attachment_placement_hierarchy",
+            None,
+        )
+        if not callable(hierarchy):
+            return None
+        return hierarchy()
+
+    def read_mattermost_attachment_promotion_destination(self, proposal: object) -> Any:
+        read_back = getattr(
+            self._gateway,
+            "read_mattermost_attachment_promotion_destination",
+            None,
+        )
+        if not callable(read_back):
+            raise ValueError(
+                "configured platform gateway cannot read promotion destination"
+            )
+        return read_back(proposal)
+
+    def get_mattermost_attachment_promotion_freshness(self, proposal: object) -> str:
+        freshness = getattr(
+            self._gateway,
+            "get_mattermost_attachment_promotion_freshness",
+            None,
+        )
+        if not callable(freshness):
+            raise ValueError(
+                "configured platform gateway cannot prove promotion freshness"
+            )
+        proof = freshness(proposal)
+        if type(proof) is not str:
+            raise ValueError("promotion freshness proof must be a string")
+        return proof
 
 
 class MattermostMutationAdapter:
