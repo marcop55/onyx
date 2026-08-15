@@ -28,6 +28,10 @@ CONNECTOR_CLASS_MAP = {
         module_path="onyx.connectors.mattermost.connector",
         class_name="MattermostConnector",
     ),
+    DocumentSource.SEAFILE: ConnectorMapping(
+        module_path="onyx.connectors.seafile.connector",
+        class_name="SeafileConnector",
+    ),
     DocumentSource.GITHUB: ConnectorMapping(
         module_path="onyx.connectors.github.connector",
         class_name="GithubConnector",

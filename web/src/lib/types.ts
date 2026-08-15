@@ -570,6 +570,7 @@ export enum ValidSources {
   GitHub = "github",
   GitLab = "gitlab",
   Slack = "slack",
+  Seafile = "seafile",
   GoogleDrive = "google_drive",
   Gmail = "gmail",
   Bookstack = "bookstack",
@@ -652,6 +653,7 @@ export const validAutoSyncSources = [
   ValidSources.Teams,
   ValidSources.Canvas,
   ValidSources.Box,
+  ValidSources.Seafile,
 ] as const;
 
 // Create a type from the array elements

@@ -219,6 +219,11 @@ export const SOURCE_METADATA_MAP: SourceMap = {
     category: SourceCategory.Storage,
     docs: `${DOCS_ADMINS_PATH}/connectors/official/box`,
   },
+  seafile: {
+    icon: SvgUploadCloud,
+    displayName: "Seafile",
+    category: SourceCategory.Storage,
+  },
   dropbox: {
     icon: SvgDropbox,
     displayName: "Dropbox",
