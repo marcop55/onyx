@@ -6,6 +6,10 @@ from onyx.configs.constants import MilestoneRecordType
 from onyx.db.constants import SLACK_BOT_PERSONA_PREFIX
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import Permission
+from onyx.db.mattermost_bot import (
+    fetch_mattermost_slash_command_config,
+    upsert_mattermost_slash_command_config,
+)
 from onyx.db.models import ChannelConfig, User
 from onyx.db.persona import get_persona_by_id
 from onyx.db.slack_bot import (
@@ -25,6 +29,8 @@ from onyx.db.slack_channel_config import (
 )
 from onyx.onyxbot.slack.config import validate_channel_name
 from onyx.server.manage.models import (
+    MattermostSlashCommandConfig,
+    MattermostSlashCommandConfigRequest,
     SlackBot,
     SlackBotCreationRequest,
     SlackChannelConfig,
@@ -353,3 +359,38 @@ def list_bot_configs(
         SlackChannelConfig.from_model(slack_bot_config_model)
         for slack_bot_config_model in slack_bot_config_models
     ]
+
+
+@router.put("/admin/mattermost/slash-command")
+def put_mattermost_slash_command_config(
+    request: MattermostSlashCommandConfigRequest,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> MattermostSlashCommandConfig:
+    config_model = upsert_mattermost_slash_command_config(
+        db_session=db_session,
+        instance_id=request.instance_id,
+        bot_user_id=request.bot_user_id,
+        token=request.token,
+        enabled=request.enabled,
+    )
+    return MattermostSlashCommandConfig.from_model(config_model)
+
+
+@router.get("/admin/mattermost/slash-command")
+def get_mattermost_slash_command_config(
+    instance_id: str,
+    bot_user_id: str,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> MattermostSlashCommandConfig | None:
+    config_model = fetch_mattermost_slash_command_config(
+        db_session=db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+    )
+    return (
+        MattermostSlashCommandConfig.from_model(config_model)
+        if config_model is not None
+        else None
+    )

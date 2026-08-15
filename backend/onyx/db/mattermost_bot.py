@@ -15,11 +15,13 @@ from onyx.db.models import (
     MattermostAttachment,
     MattermostBot,
     MattermostEventState,
+    MattermostSlashCommandConfig,
     MattermostThreadMapping,
 )
 from onyx.onyxbot.mattermost.models import MattermostListenerConfig
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
+MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
 
 
 def insert_mattermost_bot(
@@ -117,6 +119,71 @@ class MattermostEventClaim:
     outcome: MattermostClaimOutcome
     event: MattermostEventState
     claim_owner: UUID | None
+
+
+def fetch_mattermost_slash_command_config(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> MattermostSlashCommandConfig | None:
+    return db_session.scalar(
+        select(MattermostSlashCommandConfig).where(
+            MattermostSlashCommandConfig.instance_id == instance_id,
+            MattermostSlashCommandConfig.bot_user_id == bot_user_id,
+        )
+    )
+
+
+def upsert_mattermost_slash_command_config(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    token: str,
+    enabled: bool,
+) -> MattermostSlashCommandConfig:
+    config = fetch_mattermost_slash_command_config(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+    )
+    if config is None:
+        config = MattermostSlashCommandConfig(
+            instance_id=instance_id,
+            bot_user_id=bot_user_id,
+            token=token,
+            enabled=enabled,
+        )
+        db_session.add(config)
+    else:
+        config.token = token  # ty: ignore[invalid-assignment]
+        config.enabled = enabled
+    db_session.commit()
+    return config
+
+
+def get_or_bootstrap_mattermost_slash_command_config(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    bootstrap_token: str | None,
+) -> MattermostSlashCommandConfig | None:
+    config = fetch_mattermost_slash_command_config(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+    )
+    if config is not None or bootstrap_token is None:
+        return config
+    return upsert_mattermost_slash_command_config(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=bot_user_id,
+        token=bootstrap_token,
+        enabled=True,
+    )
 
 
 def claim_durable_mattermost_event(
@@ -371,6 +438,7 @@ def complete_mattermost_answer_event(
     *,
     event_id: int,
     claim_owner: UUID,
+    loaded_context_post_ids: frozenset[str] = frozenset(),
 ) -> bool:
     event = db_session.scalar(
         select(MattermostEventState)
@@ -407,7 +475,11 @@ def complete_mattermost_answer_event(
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:
         processed_event_ids.append(event.dedupe_key)
-        mapping.processed_event_ids = processed_event_ids[-10_000:]
+    for post_id in sorted(loaded_context_post_ids):
+        context_event_id = f"{MATTERMOST_CONTEXT_POST_ID_PREFIX}{post_id}"
+        if context_event_id not in processed_event_ids:
+            processed_event_ids.append(context_event_id)
+    mapping.processed_event_ids = processed_event_ids[-10_000:]
     event.state = "completed"
     event.claim_owner = None
     event.lease_expires_at = None
@@ -528,6 +600,33 @@ def get_mattermost_thread_mapping_by_chat_session_id(
             MattermostThreadMapping.chat_session_id == chat_session_id
         )
     )
+
+
+def get_loaded_mattermost_context_post_ids(
+    db_session: Session,
+    mapping_id: int,
+) -> frozenset[str]:
+    """Return source posts already represented in an Onyx turn for this mapping."""
+
+    handled_turn_post_ids = {
+        post_id
+        for post_id in db_session.scalars(
+            select(MattermostEventState.source_post_id).where(
+                MattermostEventState.mapping_id == mapping_id,
+                MattermostEventState.onyx_user_message_id.is_not(None),
+            )
+        ).all()
+        if post_id
+    }
+    mapping = db_session.get(MattermostThreadMapping, mapping_id)
+    if mapping is None:
+        return frozenset(handled_turn_post_ids)
+    loaded_context_post_ids = {
+        event_id.removeprefix(MATTERMOST_CONTEXT_POST_ID_PREFIX)
+        for event_id in mapping.processed_event_ids
+        if event_id.startswith(MATTERMOST_CONTEXT_POST_ID_PREFIX)
+    }
+    return frozenset(handled_turn_post_ids | loaded_context_post_ids)
 
 
 def get_or_create_mattermost_thread_mapping(
