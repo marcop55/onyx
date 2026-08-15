@@ -3544,6 +3544,52 @@ class MattermostBot(Base):
     time_updated: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    channel_configs: Mapped[list["MattermostChannelConfig"]] = relationship(
+        "MattermostChannelConfig",
+        back_populates="mattermost_bot",
+        cascade="all, delete-orphan",
+    )
+
+
+class MattermostChannelConfig(Base):
+    __tablename__ = "mattermost_channel_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mattermost_bot_id: Mapped[int] = mapped_column(
+        ForeignKey("mattermost_bot.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    channel_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    persona_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persona.id", ondelete="SET NULL"), nullable=True
+    )
+    channel_config: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB(), nullable=False
+    )
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+    mattermost_bot: Mapped[MattermostBot] = relationship(
+        "MattermostBot",
+        back_populates="channel_configs",
+    )
+    persona: Mapped["Persona | None"] = relationship("Persona")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "mattermost_bot_id",
+            "channel_id",
+            name="uq_mattermost_channel_config_bot_channel",
+        ),
+        Index(
+            "ix_mattermost_channel_config_bot_default",
+            "mattermost_bot_id",
+            "is_default",
+            unique=True,
+            postgresql_where=is_default.is_(true()),
+        ),
+    )
 
 
 class SearchDoc(Base):
@@ -4469,6 +4515,7 @@ class ChannelConfig(TypedDict):
     follow_up_tags: NotRequired[list[str]]
     show_continue_in_web_ui: NotRequired[bool]  # defaults to False
     disabled: NotRequired[bool]  # defaults to False
+    response_style: NotRequired[str]
 
 
 class SlackChannelConfig(Base):
@@ -4481,7 +4528,7 @@ class SlackChannelConfig(Base):
     persona_id: Mapped[int | None] = mapped_column(
         ForeignKey("persona.id"), nullable=True
     )
-    channel_config: Mapped[ChannelConfig] = mapped_column(
+    channel_config: Mapped["ChannelConfig"] = mapped_column(
         postgresql.JSONB(), nullable=False
     )
 
@@ -4491,7 +4538,7 @@ class SlackChannelConfig(Base):
 
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    persona: Mapped[Persona | None] = relationship("Persona")
+    persona: Mapped["Persona | None"] = relationship("Persona")
 
     slack_bot: Mapped["SlackBot"] = relationship(
         "SlackBot",

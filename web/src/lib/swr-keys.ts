@@ -59,6 +59,10 @@ export const SWR_KEYS = {
   federatedConnectors: "/api/federated",
   mattermostBots: "/api/manage/admin/mattermost-app/bots",
   mattermostBot: (id: number) => `/api/manage/admin/mattermost-app/bots/${id}`,
+  mattermostBotConfigs: (id: number) =>
+    `/api/manage/admin/mattermost-app/bots/${id}/config`,
+  mattermostChannelConfig: (id: number) =>
+    `/api/manage/admin/mattermost-app/channel/${id}`,
 
   // ── Google Connectors ─────────────────────────────────────────────────────
   googleConnectorCredentials: (service: "gmail" | "google-drive") =>

@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -16,6 +16,7 @@ from onyx.db.enums import (
 from onyx.db.memory import MAX_MEMORIES_PER_USER
 from onyx.db.models import AllowedAnswerFilters, ChannelConfig, User
 from onyx.db.models import MattermostBot as MattermostBotModel
+from onyx.db.models import MattermostChannelConfig as MattermostChannelConfigModel
 from onyx.db.models import (
     MattermostSlashCommandConfig as MattermostSlashCommandConfigModel,
 )
@@ -470,6 +471,58 @@ class MattermostBot(BaseModel):
             bot_username=mattermost_bot_model.bot_username,
             health_status=mattermost_bot_model.health_status,
             health_error=mattermost_bot_model.health_error,
+        )
+
+
+class MattermostResponseStyle(str, Enum):
+    DEFAULT = "default"
+    ORKA_CONCISE = "orka_concise"
+
+
+class MattermostChannelConfigCreationRequest(BaseModel):
+    mattermost_bot_id: int
+    channel_id: str | None = None
+    channel_name: str | None = None
+    persona_id: int | None = None
+    respond_tag_only: bool = True
+    response_style: MattermostResponseStyle = MattermostResponseStyle.ORKA_CONCISE
+    disabled: bool = False
+    is_default: bool = False
+
+    @model_validator(mode="after")
+    def validate_channel_identity(self) -> "MattermostChannelConfigCreationRequest":
+        if not self.is_default and not self.channel_id:
+            raise ValueError("Mattermost channel ID is required")
+        if self.is_default and self.channel_id is not None:
+            raise ValueError("Default Mattermost config cannot target a channel")
+        return self
+
+
+class MattermostChannelConfig(BaseModel):
+    id: int
+    mattermost_bot_id: int
+    channel_id: str | None
+    channel_name: str | None
+    persona: PersonaSnapshot | None
+    channel_config: ChannelConfig
+    is_default: bool
+
+    @classmethod
+    def from_model(
+        cls, config_model: MattermostChannelConfigModel
+    ) -> "MattermostChannelConfig":
+        return cls(
+            id=config_model.id,
+            mattermost_bot_id=config_model.mattermost_bot_id,
+            channel_id=config_model.channel_id,
+            channel_name=config_model.channel_name,
+            persona=(
+                FullPersonaSnapshot.from_model(config_model.persona, allow_deleted=True)
+                if config_model.persona
+                else None
+            ),
+            channel_config=cast(ChannelConfig, config_model.channel_config),
+            is_default=config_model.is_default,
         )
 
 

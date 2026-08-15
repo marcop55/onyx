@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 from onyx.db.chat import create_chat_session, get_or_create_root_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.models import (
+    ChannelConfig,
     ChatSession,
     MattermostAttachment,
     MattermostBot,
+    MattermostChannelConfig,
     MattermostEventState,
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
@@ -76,6 +78,141 @@ def update_mattermost_bot(
     mattermost_bot.health_error = health_error
     db_session.commit()
     return mattermost_bot
+
+
+def insert_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int,
+    channel_id: str | None,
+    channel_name: str | None,
+    persona_id: int | None,
+    channel_config: ChannelConfig,
+    is_default: bool = False,
+) -> MattermostChannelConfig:
+    if not is_default and not channel_id:
+        raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if is_default:
+        existing_default = db_session.scalar(
+            select(MattermostChannelConfig).where(
+                MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id,
+                MattermostChannelConfig.is_default.is_(True),
+            )
+        )
+        if existing_default is not None:
+            raise ValueError("A default config already exists for this Mattermost bot.")
+    config = MattermostChannelConfig(
+        mattermost_bot_id=mattermost_bot_id,
+        channel_id=channel_id,
+        channel_name=channel_name,
+        persona_id=persona_id,
+        channel_config=channel_config,
+        is_default=is_default,
+    )
+    db_session.add(config)
+    db_session.commit()
+    return config
+
+
+def fetch_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+) -> MattermostChannelConfig:
+    config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if config is None:
+        raise ValueError(
+            f"Unable to find Mattermost channel config with ID {mattermost_channel_config_id}"
+        )
+    return config
+
+
+def fetch_mattermost_channel_configs(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int | None = None,
+) -> list[MattermostChannelConfig]:
+    stmt = select(MattermostChannelConfig)
+    if mattermost_bot_id is not None:
+        stmt = stmt.where(
+            MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id
+        )
+    return list(db_session.scalars(stmt).all())
+
+
+def fetch_mattermost_channel_config_for_bot_and_channel(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    channel_id: str,
+) -> MattermostChannelConfig | None:
+    bot = db_session.scalar(
+        select(MattermostBot).where(
+            MattermostBot.url == instance_id,
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostBot.enabled.is_(True),
+        )
+    )
+    if bot is None:
+        return None
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.channel_id == channel_id,
+        )
+    )
+    if channel_config is not None:
+        return channel_config
+    return db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.is_default.is_(True),
+        )
+    )
+
+
+def update_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+    channel_id: str | None,
+    channel_name: str | None,
+    persona_id: int | None,
+    channel_config: ChannelConfig,
+) -> MattermostChannelConfig:
+    config = fetch_mattermost_channel_config(
+        db_session,
+        mattermost_channel_config_id=mattermost_channel_config_id,
+    )
+    if not config.is_default and not channel_id:
+        raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    config.channel_id = channel_id
+    config.channel_name = channel_name
+    config.persona_id = persona_id
+    config.channel_config = channel_config  # ty: ignore[invalid-assignment]
+    db_session.commit()
+    return config
+
+
+def remove_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+) -> None:
+    config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if config is None:
+        return
+    db_session.delete(config)
+    db_session.commit()
 
 
 def fetch_mattermost_bot(
