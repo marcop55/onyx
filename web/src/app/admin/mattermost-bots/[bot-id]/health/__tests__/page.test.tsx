@@ -77,3 +77,54 @@ test("renders Mattermost health, delivery, channel and indexing observability", 
   expect(screen.getByText("Indexed documents")).toBeInTheDocument();
   expect(screen.getByText("42")).toBeInTheDocument();
 });
+
+test("renders joined-channel discovery failures separately from empty membership", async () => {
+  const fetchSpy = jest.spyOn(global, "fetch");
+  fetchSpy.mockResolvedValueOnce({
+    status: 200,
+    ok: true,
+    json: async () => ({
+      bot_id: 7,
+      bot_name: "prod mattermost",
+      instance_id: "https://mattermost.example.com/team",
+      enabled: true,
+      bot_user_id: "bot-user",
+      bot_username: "onyxbot",
+      health_status: "error",
+      health_error: "Mattermost joined-channel discovery failed",
+      joined_channels: [],
+      delivery: {
+        total_events: 0,
+        completed_events: 0,
+        in_progress_events: 0,
+        replayable_events: 0,
+        attachment_failure_events: 0,
+        rate_limited_events: 0,
+        latest_event_at: null,
+        by_event_type: {},
+      },
+      indexing: {
+        connectors: [],
+        latest_successful_index_time: null,
+        total_docs_indexed: 0,
+      },
+    }),
+  } as Response);
+
+  render(<MattermostBotHealthPage />);
+
+  expect(
+    await screen.findByText("Mattermost joined-channel discovery failed")
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      "Joined-channel discovery failed. Check the connection health error above."
+    )
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText("No joined channels were returned by Mattermost.")
+  ).not.toBeInTheDocument();
+  expect(fetchSpy).toHaveBeenCalledWith(
+    "/api/manage/admin/mattermost-app/bots/7/observability"
+  );
+});

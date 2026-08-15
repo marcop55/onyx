@@ -18,6 +18,8 @@ _STUCK_STATES = frozenset(
 )
 _ATTACHMENT_FAILURE_STATES = frozenset({"attachment_failed", "file_failed"})
 _RATE_LIMIT_STATES = frozenset({"rate_limited"})
+_ATTACHMENT_FAILURE_TERMINAL_OUTCOMES = frozenset({"attachment_failed"})
+_RATE_LIMIT_TERMINAL_OUTCOMES = frozenset({"rate_limited"})
 
 
 class MattermostChannelHealth(BaseModel):
@@ -81,6 +83,7 @@ def summarize_delivery_state(
 
     for event in events:
         state = _safe_str(getattr(event, "state", ""))
+        terminal_outcome = _safe_str(getattr(event, "terminal_outcome", ""))
         event_type = _safe_str(getattr(event, "event_type", "unknown")) or "unknown"
         by_event_type[event_type] += 1
         updated_at = getattr(event, "time_updated", None) or getattr(
@@ -100,9 +103,15 @@ def summarize_delivery_state(
                 and lease_expires_at <= current_time
             ):
                 replayable_events += 1
-        if state in _ATTACHMENT_FAILURE_STATES:
+        if (
+            state in _ATTACHMENT_FAILURE_STATES
+            or terminal_outcome in _ATTACHMENT_FAILURE_TERMINAL_OUTCOMES
+        ):
             attachment_failure_events += 1
-        if state in _RATE_LIMIT_STATES:
+        if (
+            state in _RATE_LIMIT_STATES
+            or terminal_outcome in _RATE_LIMIT_TERMINAL_OUTCOMES
+        ):
             rate_limited_events += 1
 
     return MattermostDeliverySummary(

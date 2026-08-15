@@ -116,7 +116,9 @@ export default function MattermostBotHealthPage() {
             <CardContent>
               {data.joined_channels.length === 0 ? (
                 <Text as="p" font="main-ui-body" color="text-03">
-                  No joined channels were returned by Mattermost.
+                  {data.health_error
+                    ? "Joined-channel discovery failed. Check the connection health error above."
+                    : "No joined channels were returned by Mattermost."}
                 </Text>
               ) : (
                 <div className="grid gap-2">

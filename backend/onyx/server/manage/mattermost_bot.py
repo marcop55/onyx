@@ -37,6 +37,9 @@ from onyx.server.manage.models import (
 from onyx.utils.errors import EERequiredError
 
 router = APIRouter(prefix="/manage")
+_MATTERMOST_JOINED_CHANNEL_DISCOVERY_ERROR = (
+    "Mattermost joined-channel discovery failed"
+)
 
 
 def _form_channel_config(
@@ -123,14 +126,11 @@ def _discover_joined_channels_sync(bot: object) -> list[MattermostChannelHealth]
     if token is None:
         return []
     raw_token = token.get_value(apply_mask=False)
-    try:
-        return asyncio.run(
-            discover_joined_mattermost_channels(
-                getattr(bot, "url"), raw_token, getattr(bot, "bot_user_id")
-            )
+    return asyncio.run(
+        discover_joined_mattermost_channels(
+            getattr(bot, "url"), raw_token, getattr(bot, "bot_user_id")
         )
-    except MattermostClientError:
-        return []
+    )
 
 
 @router.post("/admin/mattermost-app/bots")
@@ -235,10 +235,16 @@ def get_bot_observability(
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> MattermostObservabilitySnapshot:
     bot = fetch_mattermost_bot(db_session, mattermost_bot_id)
+    try:
+        joined_channels = _discover_joined_channels_sync(bot)
+    except MattermostClientError:
+        bot.health_status = "error"
+        bot.health_error = _MATTERMOST_JOINED_CHANNEL_DISCOVERY_ERROR
+        joined_channels = []
     return collect_mattermost_observability(
         db_session,
         bot,
-        joined_channels=_discover_joined_channels_sync(bot),
+        joined_channels=joined_channels,
     )
 
 
