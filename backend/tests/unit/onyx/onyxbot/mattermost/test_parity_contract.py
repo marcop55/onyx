@@ -89,6 +89,8 @@ def test_authorization_denial_is_manifested_for_admitted_runtime_paths() -> None
     assert all(
         "backend/onyx/onyxbot/mattermost/listener.py:_authorize_and_attribute_event"
         in entry.evidence
+        or "backend/onyx/connectors/mattermost/connector.py:MattermostConnector"
+        in entry.evidence
         for entry in admitted_runtime_entries
     )
     assert matrix_by_key()["non_admin_seafile_mutation"].status is (
@@ -109,6 +111,7 @@ def test_replay_safe_entries_have_durable_or_idempotent_evidence() -> None:
             evidence.startswith("backend/onyx/db/mattermost_bot.py")
             or evidence.startswith("backend/onyx/onyxbot/mattermost/listener.py")
             or evidence.startswith("backend/onyx/onyxbot/mattermost/handler.py")
+            or evidence.startswith("backend/onyx/connectors/mattermost/connector.py")
             for evidence in entry.evidence
         )
 
@@ -187,8 +190,9 @@ def test_primary_platform_gap_records_fallback_without_weakening_retrieval() -> 
         == "Use the configured service identity and shared PoC knowledge scope until a credentialed per-user mapping is explicitly designed."
     )
     assert "shared_full_corpus" in private_permissions.guarantees
-    assert history_connector.status is MattermostParityStatus.PLATFORM_GAP
+    assert history_connector.status is MattermostParityStatus.DIRECT_MATTERMOST_FEATURE
     assert "no_fake_connectors" in history_connector.guarantees
+    assert "shared_full_corpus" in history_connector.guarantees
 
 
 def test_human_matrix_lists_every_executable_manifest_key() -> None:
