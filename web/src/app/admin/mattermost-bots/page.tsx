@@ -8,6 +8,7 @@ import { Button } from "@opal/components";
 import { SettingsLayouts, toast } from "@opal/layouts";
 import { useState } from "react";
 import useSWR from "swr";
+import { MattermostChannelConfigPanel } from "./MattermostChannelConfigPanel";
 import { MattermostBotForm } from "./MattermostBotForm";
 import { MattermostBotTable } from "./MattermostBotTable";
 
@@ -59,10 +60,15 @@ export default function MattermostBotsPage() {
       />
       <SettingsLayouts.Body>
         {(isCreating || editingBot) && (
-          <MattermostBotForm
-            existingMattermostBot={editingBot}
-            onSaved={onSaved}
-          />
+          <div className="space-y-6">
+            <MattermostBotForm
+              existingMattermostBot={editingBot}
+              onSaved={onSaved}
+            />
+            {editingBot && (
+              <MattermostChannelConfigPanel mattermostBotId={editingBot.id} />
+            )}
+          </div>
         )}
         {isLoading ? (
           <div>Loading Mattermost bots...</div>

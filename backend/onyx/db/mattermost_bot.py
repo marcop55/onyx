@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from onyx.db.chat import create_chat_session, get_or_create_root_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.models import (
+    ChannelConfig,
     ChatSession,
     MattermostAttachment,
     MattermostBot,
@@ -84,6 +85,176 @@ def update_mattermost_bot(
     return mattermost_bot
 
 
+def _default_mattermost_channel_config(
+    *,
+    channel_name: str | None,
+    respond_tag_only: bool = True,
+    response_style: str = "orka_concise",
+    disabled: bool = False,
+) -> ChannelConfig:
+    return {
+        "channel_name": channel_name,
+        "respond_tag_only": respond_tag_only,
+        "response_style": response_style,
+        "disabled": disabled,
+    }
+
+
+def insert_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int,
+    channel_id: str | None,
+    channel_name: str | None = None,
+    persona_id: int | None = None,
+    channel_config: ChannelConfig | None = None,
+    is_default: bool = False,
+    is_ephemeral: bool = False,
+    enabled: bool = True,
+) -> MattermostChannelConfig:
+    if not is_default and not channel_id:
+        raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if is_default and channel_id is not None:
+        raise ValueError("Default Mattermost config cannot target a channel.")
+    if is_default:
+        existing_default = db_session.scalar(
+            select(MattermostChannelConfig).where(
+                MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id,
+                MattermostChannelConfig.is_default.is_(True),
+            )
+        )
+        if existing_default is not None:
+            raise ValueError("A default config already exists for this Mattermost bot.")
+    config = MattermostChannelConfig(
+        mattermost_bot_id=mattermost_bot_id,
+        channel_id=channel_id,
+        channel_name=channel_name,
+        persona_id=persona_id,
+        channel_config=channel_config
+        or _default_mattermost_channel_config(channel_name=channel_name),
+        is_default=is_default,
+        is_ephemeral=is_ephemeral,
+        enabled=enabled,
+    )
+    db_session.add(config)
+    db_session.commit()
+    return config
+
+
+def fetch_mattermost_channel_config(
+    db_session: Session,
+    mattermost_channel_config_id: int,
+) -> MattermostChannelConfig:
+    config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if config is None:
+        raise ValueError(
+            f"Unable to find Mattermost channel config with ID {mattermost_channel_config_id}"
+        )
+    return config
+
+
+def fetch_mattermost_channel_configs(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int | None = None,
+) -> list[MattermostChannelConfig]:
+    stmt = select(MattermostChannelConfig)
+    if mattermost_bot_id is not None:
+        stmt = stmt.where(
+            MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id
+        )
+    return list(db_session.scalars(stmt).all())
+
+
+def fetch_mattermost_channel_config_for_bot_and_channel(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    channel_id: str,
+) -> MattermostChannelConfig | None:
+    bot = db_session.scalar(
+        select(MattermostBot).where(
+            MattermostBot.url == instance_id,
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostBot.enabled.is_(True),
+        )
+    )
+    if bot is None:
+        return None
+    channel_config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.channel_id == channel_id,
+            MattermostChannelConfig.enabled.is_(True),
+        )
+    )
+    if channel_config is not None:
+        return channel_config
+    return db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.is_default.is_(True),
+            MattermostChannelConfig.enabled.is_(True),
+        )
+    )
+
+
+def update_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+    mattermost_bot_id: int | None = None,
+    channel_id: str | None,
+    channel_name: str | None = None,
+    persona_id: int | None = None,
+    channel_config: ChannelConfig | None = None,
+    is_ephemeral: bool | None = None,
+    enabled: bool | None = None,
+) -> MattermostChannelConfig:
+    config = fetch_mattermost_channel_config(
+        db_session,
+        mattermost_channel_config_id=mattermost_channel_config_id,
+    )
+    if mattermost_bot_id is not None:
+        config.mattermost_bot_id = mattermost_bot_id
+    if not config.is_default and not channel_id:
+        raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if config.is_default and channel_id is not None:
+        raise ValueError("Default Mattermost config cannot target a channel.")
+    config.channel_id = channel_id
+    config.channel_name = channel_name
+    config.persona_id = persona_id
+    if channel_config is not None:
+        config.channel_config = channel_config  # ty: ignore[invalid-assignment]
+    if is_ephemeral is not None:
+        config.is_ephemeral = is_ephemeral
+    if enabled is not None:
+        config.enabled = enabled
+    db_session.commit()
+    return config
+
+
+def remove_mattermost_channel_config(
+    db_session: Session,
+    *,
+    mattermost_channel_config_id: int,
+) -> None:
+    config = db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.id == mattermost_channel_config_id
+        )
+    )
+    if config is None:
+        return
+    db_session.delete(config)
+    db_session.commit()
+
+
 def fetch_mattermost_bot(
     db_session: Session,
     mattermost_bot_id: int,
@@ -110,91 +281,6 @@ def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> Non
     db_session.commit()
 
 
-def insert_mattermost_channel_config(
-    db_session: Session,
-    *,
-    mattermost_bot_id: int,
-    channel_id: str,
-    is_ephemeral: bool,
-    enabled: bool,
-) -> MattermostChannelConfig:
-    channel_config = MattermostChannelConfig(
-        mattermost_bot_id=mattermost_bot_id,
-        channel_id=channel_id,
-        is_ephemeral=is_ephemeral,
-        enabled=enabled,
-    )
-    db_session.add(channel_config)
-    db_session.commit()
-    return channel_config
-
-
-def fetch_mattermost_channel_config(
-    db_session: Session,
-    mattermost_channel_config_id: int,
-) -> MattermostChannelConfig:
-    channel_config = db_session.scalar(
-        select(MattermostChannelConfig).where(
-            MattermostChannelConfig.id == mattermost_channel_config_id
-        )
-    )
-    if channel_config is None:
-        raise ValueError(
-            "Unable to find Mattermost Channel Config with ID "
-            f"{mattermost_channel_config_id}"
-        )
-    return channel_config
-
-
-def fetch_mattermost_channel_configs(
-    db_session: Session,
-    *,
-    mattermost_bot_id: int | None = None,
-) -> list[MattermostChannelConfig]:
-    statement = select(MattermostChannelConfig)
-    if mattermost_bot_id is not None:
-        statement = statement.where(
-            MattermostChannelConfig.mattermost_bot_id == mattermost_bot_id
-        )
-    return list(db_session.scalars(statement).all())
-
-
-def update_mattermost_channel_config(
-    db_session: Session,
-    *,
-    mattermost_channel_config_id: int,
-    mattermost_bot_id: int,
-    channel_id: str,
-    is_ephemeral: bool,
-    enabled: bool,
-) -> MattermostChannelConfig:
-    channel_config = fetch_mattermost_channel_config(
-        db_session, mattermost_channel_config_id
-    )
-    channel_config.mattermost_bot_id = mattermost_bot_id
-    channel_config.channel_id = channel_id
-    channel_config.is_ephemeral = is_ephemeral
-    channel_config.enabled = enabled
-    db_session.commit()
-    return channel_config
-
-
-def remove_mattermost_channel_config(
-    db_session: Session,
-    *,
-    mattermost_channel_config_id: int,
-) -> None:
-    channel_config = db_session.scalar(
-        select(MattermostChannelConfig).where(
-            MattermostChannelConfig.id == mattermost_channel_config_id
-        )
-    )
-    if channel_config is None:
-        return
-    db_session.delete(channel_config)
-    db_session.commit()
-
-
 def fetch_mattermost_private_answer_channel_ids(
     db_session: Session,
     *,
@@ -214,6 +300,7 @@ def fetch_mattermost_private_answer_channel_ids(
     return frozenset(
         channel_config.channel_id
         for channel_config in channel_configs
+        if channel_config.channel_id is not None
         if _canonical_mattermost_instance_id(channel_config.mattermost_bot.url)
         == instance_id
     )

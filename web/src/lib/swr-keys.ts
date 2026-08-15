@@ -59,6 +59,8 @@ export const SWR_KEYS = {
   federatedConnectors: "/api/federated",
   mattermostBots: "/api/manage/admin/mattermost-app/bots",
   mattermostBot: (id: number) => `/api/manage/admin/mattermost-app/bots/${id}`,
+  mattermostBotConfigs: (id: number) =>
+    `/api/manage/admin/mattermost-app/bots/${id}/config`,
   mattermostChannelConfigs: (mattermostBotId: number) =>
     `/api/manage/admin/mattermost-app/channel?mattermost_bot_id=${mattermostBotId}`,
   mattermostChannelConfig: (id: number) =>
