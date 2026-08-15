@@ -49,7 +49,7 @@ def _validate_mattermost_attachment_metadata(
     if mime_type not in OnyxMimeTypes.ALLOWED_MIME_TYPES:
         raise MattermostClientError(f"unsupported Mattermost file type: {mime_type}")
     if size_bytes is None:
-        return
+        raise MattermostClientError("Mattermost file size metadata is required")
     if size_bytes < 0:
         raise MattermostClientError("Mattermost file size cannot be negative")
     max_size_bytes = MAX_ALLOWED_UPLOAD_SIZE_MB * 1024 * 1024
@@ -62,11 +62,9 @@ def _validate_mattermost_attachment_metadata(
 def _validate_mattermost_attachment_bytes(
     *,
     file_id: str,
-    expected_size_bytes: int | None,
+    expected_size_bytes: int,
     content: bytes,
 ) -> None:
-    if expected_size_bytes is None:
-        return
     actual_size_bytes = len(content)
     if actual_size_bytes != expected_size_bytes:
         raise MattermostClientError(
@@ -119,6 +117,7 @@ async def save_mattermost_attachments(
             mime_type=mime_type,
             size_bytes=info.size_bytes,
         )
+        assert info.size_bytes is not None
         content = await client.download_file(file_id)
         _validate_mattermost_attachment_bytes(
             file_id=file_id,

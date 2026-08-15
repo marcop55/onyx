@@ -252,3 +252,46 @@ async def test_rejects_mattermost_attachment_when_downloaded_size_changes() -> N
 
     file_store.save_file.assert_not_called()
     mock_record_attachment.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rejects_mattermost_attachment_without_size_metadata_before_download() -> (
+    None
+):
+    db_session = MagicMock()
+    db_session.scalar.return_value = None
+    client = MagicMock()
+    client.get_file_info = AsyncMock(
+        return_value=MattermostFileInfo(
+            id="file-1",
+            uploader_user_id="user-1",
+            post_id="post-1",
+            filename="brief.txt",
+            mime_type="text/plain",
+            size_bytes=None,
+        )
+    )
+    client.download_file = AsyncMock(return_value=b"hello world")
+    file_store = MagicMock()
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.attachments.get_default_file_store",
+            return_value=file_store,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.attachments.record_mattermost_attachment"
+        ) as mock_record_attachment,
+        pytest.raises(MattermostClientError, match="file size metadata is required"),
+    ):
+        await save_mattermost_attachments(
+            client=client,
+            db_session=db_session,
+            event=_event(),
+            ledger_event=_ledger_event(),
+            service_user_id=UUID("00000000-0000-0000-0000-000000000456"),
+        )
+
+    client.download_file.assert_not_awaited()
+    file_store.save_file.assert_not_called()
+    mock_record_attachment.assert_not_called()
