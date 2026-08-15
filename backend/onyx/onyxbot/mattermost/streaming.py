@@ -11,7 +11,6 @@ from onyx.context.search.models import SearchDoc
 from onyx.onyxbot.mattermost.formatting import (
     MATTERMOST_DEFAULT_MAX_PART_CHARS,
     MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR,
-    format_mattermost_answer,
     format_mattermost_answer_parts,
     has_linked_mattermost_source,
 )
@@ -33,6 +32,9 @@ MATTERMOST_STREAM_FAILURE_SUFFIX = (
     "Onyx stopped before it finished this answer. Try again later."
 )
 MATTERMOST_NO_CITATIONS_MESSAGE = "Found no citations or quotes when trying to answer."
+MATTERMOST_EPHEMERAL_TOO_LONG_MESSAGE = (
+    "Answer too long for one ephemeral message. Ask in a thread instead."
+)
 MATTERMOST_MIN_UPDATE_CHARS = 80
 MattermostFinalPropsFactory = Callable[[int, str], Awaitable[dict[str, object] | None]]
 
@@ -192,9 +194,12 @@ async def stream_mattermost_answer(
         _require_owner_fence(before_external_update)
         await _show_failure(
             client=client,
+            channel_id=channel_id,
+            root_id=root_id,
             post_id=post_id,
             answer=answer,
             sent_messages=sent_messages,
+            max_part_chars=max_part_chars,
         )
         raise MattermostStreamVisibleError(str(exc)) from exc
 
@@ -202,14 +207,17 @@ async def stream_mattermost_answer(
         _require_owner_fence(before_external_update)
         await _show_failure(
             client=client,
+            channel_id=channel_id,
+            root_id=root_id,
             post_id=post_id,
             answer=answer,
             sent_messages=sent_messages,
+            max_part_chars=max_part_chars,
         )
         raise MattermostStreamVisibleError("Message ID is required")
 
     if no_results_message and not top_documents and not citations:
-        final_messages = [no_results_message]
+        final_messages = _bounded_text_parts(no_results_message, max_part_chars)
     elif require_citations and not has_linked_mattermost_source(
         citations, top_documents
     ):
@@ -266,6 +274,7 @@ async def stream_mattermost_ephemeral_answer(
     response_type: str = "citations",
     include_source_previews: bool = False,
     require_citations: bool = False,
+    max_part_chars: int = MATTERMOST_DEFAULT_MAX_PART_CHARS,
 ) -> MattermostStreamResult:
     """Render one Onyx answer and send it as a Mattermost ephemeral post."""
 
@@ -302,7 +311,7 @@ async def stream_mattermost_ephemeral_answer(
             user_id=user_id,
             channel_id=channel_id,
             root_id=root_id,
-            message=_format_failure_message(answer),
+            message=_format_bounded_failure_message(answer, max_part_chars),
             before_external_update=before_external_update,
             before_ephemeral_delivery=before_ephemeral_delivery,
             after_ephemeral_delivery=after_ephemeral_delivery,
@@ -316,7 +325,7 @@ async def stream_mattermost_ephemeral_answer(
             user_id=user_id,
             channel_id=channel_id,
             root_id=root_id,
-            message=_format_failure_message(answer),
+            message=_format_bounded_failure_message(answer, max_part_chars),
             before_external_update=before_external_update,
             before_ephemeral_delivery=before_ephemeral_delivery,
             after_ephemeral_delivery=after_ephemeral_delivery,
@@ -325,13 +334,13 @@ async def stream_mattermost_ephemeral_answer(
         raise MattermostStreamVisibleError("Message ID is required")
 
     if no_results_message and not top_documents and not citations:
-        final_message = no_results_message
+        final_messages = _bounded_text_parts(no_results_message, max_part_chars)
     elif require_citations and not has_linked_mattermost_source(
         citations, top_documents
     ):
-        final_message = MATTERMOST_NO_CITATIONS_MESSAGE
+        final_messages = [MATTERMOST_NO_CITATIONS_MESSAGE]
     else:
-        final_message = format_mattermost_answer(
+        final_messages = format_mattermost_answer_parts(
             ChatBasicResponse(
                 answer=answer,
                 answer_citationless=answer,
@@ -342,7 +351,9 @@ async def stream_mattermost_ephemeral_answer(
             ),
             response_type=response_type,
             include_source_previews=include_source_previews,
+            max_part_chars=max_part_chars,
         )
+    final_message = _bounded_ephemeral_message(final_messages, max_part_chars)
     if checkpoint_final is not None:
         checkpoint_final(final_message, message_id)
     post = await _deliver_ephemeral_once(
@@ -492,19 +503,67 @@ async def _update_once(
 async def _show_failure(
     *,
     client: MattermostStreamingClient,
+    channel_id: str,
+    root_id: str,
     post_id: str,
     answer: str,
     sent_messages: set[str],
+    max_part_chars: int,
 ) -> None:
-    await _update_once(
+    await deliver_mattermost_rendered_messages(
         client=client,
+        channel_id=channel_id,
+        root_id=root_id,
         post_id=post_id,
-        message=_format_failure_message(answer),
+        rendered_message=_serialize_rendered_messages(
+            _format_failure_message_parts(answer, max_part_chars)
+        ),
         sent_messages=sent_messages,
     )
 
 
-def _format_failure_message(answer: str) -> str:
+def _format_bounded_failure_message(answer: str, max_part_chars: int) -> str:
+    return _format_failure_message_parts(answer, max_part_chars)[-1]
+
+
+def _format_failure_message_parts(answer: str, max_part_chars: int) -> list[str]:
     if not answer:
-        return MATTERMOST_STREAM_FAILURE_SUFFIX
-    return answer + "\n\n" + MATTERMOST_STREAM_FAILURE_SUFFIX
+        return _bounded_text_parts(MATTERMOST_STREAM_FAILURE_SUFFIX, max_part_chars)
+    answer_parts = _bounded_text_parts(answer, max_part_chars)
+    final_answer_part = answer_parts[-1]
+    if (
+        len(final_answer_part) + len(MATTERMOST_STREAM_FAILURE_SUFFIX) + 2
+        <= max_part_chars
+    ):
+        answer_parts[-1] = final_answer_part + "\n\n" + MATTERMOST_STREAM_FAILURE_SUFFIX
+        return answer_parts
+    return answer_parts + _bounded_text_parts(
+        MATTERMOST_STREAM_FAILURE_SUFFIX, max_part_chars
+    )
+
+
+def _bounded_ephemeral_message(messages: list[str], max_part_chars: int) -> str:
+    if len(messages) == 1 and len(messages[0]) <= max_part_chars:
+        return messages[0]
+    return _bounded_text_parts(
+        MATTERMOST_EPHEMERAL_TOO_LONG_MESSAGE,
+        max_part_chars,
+    )[0]
+
+
+def _bounded_text_parts(text: str, limit: int) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at <= 0:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        parts.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        parts.append(remaining)
+    return parts

@@ -23,6 +23,7 @@ from onyx.onyxbot.mattermost.streaming import (
     MattermostStreamResult,
     MattermostStreamVisibleError,
     stream_mattermost_answer,
+    stream_mattermost_ephemeral_answer,
 )
 from onyx.server.query_and_chat.models import MessageResponseIDInfo, SendMessageRequest
 from onyx.server.query_and_chat.streaming_models import (
@@ -598,6 +599,143 @@ async def test_stream_mattermost_answer_failure_updates_existing_post_once() -> 
             "message": "partial answer\n\n" + MATTERMOST_STREAM_FAILURE_SUFFIX,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_answer_bounds_failure_update_payload() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content="partial answer " * 12)),
+            StreamingError(error="model failed"),
+        ]
+    )
+
+    with pytest.raises(MattermostStreamVisibleError, match="model failed"):
+        await stream_mattermost_answer(
+            client=client,
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            min_update_chars=10_000,
+            max_part_chars=max_part_chars,
+        )
+
+    delivered_messages = _delivered_messages(client)
+    assert delivered_messages
+    assert all(len(message) <= max_part_chars for message in delivered_messages)
+    assert delivered_messages[-1].endswith(MATTERMOST_STREAM_FAILURE_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_answer_bounds_missing_message_failure_update() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter([_packet(AgentResponseDelta(content="partial answer " * 12))])
+
+    with pytest.raises(MattermostStreamVisibleError, match="Message ID is required"):
+        await stream_mattermost_answer(
+            client=client,
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            min_update_chars=10_000,
+            max_part_chars=max_part_chars,
+        )
+
+    delivered_messages = _delivered_messages(client)
+    assert delivered_messages
+    assert all(len(message) <= max_part_chars for message in delivered_messages)
+    assert delivered_messages[-1].endswith(MATTERMOST_STREAM_FAILURE_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_ephemeral_answer_bounds_final_payload() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc()])),
+            _packet(AgentResponseDelta(content="cited answer [1]. " + "more " * 40)),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_ephemeral_answer(
+        client=client,
+        user_id="user-1",
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        max_part_chars=max_part_chars,
+    )
+
+    assert result == MattermostStreamResult(message_id=22, post_id="ephemeral-post-1")
+    assert client.ephemeral_posts
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.ephemeral_posts
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_ephemeral_answer_bounds_failure_payload() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content="partial answer " * 12)),
+            StreamingError(error="model failed"),
+        ]
+    )
+
+    with pytest.raises(MattermostStreamVisibleError, match="model failed"):
+        await stream_mattermost_ephemeral_answer(
+            client=client,
+            user_id="user-1",
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            max_part_chars=max_part_chars,
+        )
+
+    assert client.ephemeral_posts
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.ephemeral_posts
+    )
+    assert str(client.ephemeral_posts[-1]["message"]).endswith(
+        MATTERMOST_STREAM_FAILURE_SUFFIX
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_mattermost_ephemeral_answer_bounds_missing_message_failure() -> (
+    None
+):
+    client = _RecordingClient()
+    max_part_chars = 72
+    packets = iter([_packet(AgentResponseDelta(content="partial answer " * 12))])
+
+    with pytest.raises(MattermostStreamVisibleError, match="Message ID is required"):
+        await stream_mattermost_ephemeral_answer(
+            client=client,
+            user_id="user-1",
+            channel_id="channel-1",
+            root_id="root-post-1",
+            packets=packets,
+            max_part_chars=max_part_chars,
+        )
+
+    assert client.ephemeral_posts
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.ephemeral_posts
+    )
+    assert str(client.ephemeral_posts[-1]["message"]).endswith(
+        MATTERMOST_STREAM_FAILURE_SUFFIX
+    )
 
 
 @pytest.mark.parametrize("ambiguous_create", [False, True])
@@ -1325,6 +1463,12 @@ def _confirm_mutation_actions(
     return [action for action in actions if action["id"] == "confirm_mutation"]
 
 
+def _delivered_messages(client: "_RecordingClient") -> list[str]:
+    return [str(update["message"]) for update in client.updated_posts] + [
+        str(post["message"]) for post in client.created_posts
+    ]
+
+
 class _RecordingClient:
     def __init__(
         self,
@@ -1334,6 +1478,7 @@ class _RecordingClient:
     ) -> None:
         self.created_posts: list[dict[str, object]] = []
         self.updated_posts: list[dict[str, object]] = []
+        self.ephemeral_posts: list[dict[str, object]] = []
         self.reconciliation_requests: list[dict[str, str]] = []
         self.memberships = memberships or [True, True]
         self.identity = identity
@@ -1385,7 +1530,15 @@ class _RecordingClient:
         root_id: str = "",
         props: dict[str, object] | None = None,
     ) -> MattermostPost:
-        _ = props
+        ephemeral_post: dict[str, object] = {
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "root_id": root_id,
+            "message": message,
+        }
+        if props is not None:
+            ephemeral_post["props"] = props
+        self.ephemeral_posts.append(ephemeral_post)
         return MattermostPost(
             id="ephemeral-post-1",
             message=message,
