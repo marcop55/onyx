@@ -479,6 +479,7 @@ async def handle_normalized_mattermost_event(
                     else frozenset()
                 ),
                 renew_owner_fence=renew_owner_fence,
+                channel_filter_result=channel_filter_result,
             )
 
         if post_id is None:
@@ -706,6 +707,7 @@ async def _run_ephemeral_answer(
     thread_context_text: str | None,
     loaded_context_post_ids: frozenset[str],
     renew_owner_fence: Callable[[], bool],
+    channel_filter_result: MattermostChannelFilterResult | None,
 ) -> bool:
     packets = _checkpoint_mattermost_turn_packets(
         packets=_stream_mattermost_answer_packets(
@@ -717,6 +719,7 @@ async def _run_ephemeral_answer(
             file_descriptors=file_descriptors,
             external_idempotency_key=f"mattermost:event:{ledger_event.id}",
             thread_context=thread_context_text,
+            channel_filter_result=channel_filter_result,
         ),
         db_session=db_session,
         event_id=ledger_event.id,
@@ -755,6 +758,11 @@ async def _run_ephemeral_answer(
             claim_owner=claim_owner,
             terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERED,
             post_id=post_id,
+        ),
+        no_results_message=(
+            channel_filter_result.no_results_message
+            if channel_filter_result is not None
+            else None
         ),
         props={"onyx_event_key": str(ledger_event.id)},
     )

@@ -9,8 +9,11 @@ from uuid import UUID
 import aiohttp
 import pytest
 
+from onyx.configs.constants import DocumentSource
+from onyx.context.search.models import BaseFilters, Tag
 from onyx.db.mattermost_bot import MattermostClaimOutcome, MattermostEventClaim
 from onyx.db.models import MattermostEventState
+from onyx.onyxbot.mattermost.channel_filters import MattermostChannelFilterResult
 from onyx.onyxbot.mattermost.client import MattermostClient, MattermostClientError
 from onyx.onyxbot.mattermost.models import (
     MattermostDeliveryTerminalOutcome,
@@ -249,6 +252,85 @@ async def test_channel_filter_denial_preserves_ephemeral_delivery(
             "channel_id": "channel-1",
             "root_id": "" if entrypoint == "slash" else "root-post-1",
             "message": MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+        }
+    ]
+
+
+@pytest.mark.parametrize("entrypoint", ["slash", "private_channel"])
+@pytest.mark.asyncio
+async def test_allowed_channel_filter_constrains_ephemeral_retrieval(
+    entrypoint: str,
+) -> None:
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+    from onyx.server.query_and_chat.models import SendMessageRequest
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(id=7),
+    )
+    event = replace(
+        _slash_event() if entrypoint == "slash" else _channel_event(),
+        text="summarize in:town-square",
+    )
+    config = MattermostHandlerConfig(
+        persona_id=456,
+        ephemeral_response_channel_ids=frozenset(
+            {"channel-1"} if entrypoint == "private_channel" else set()
+        ),
+    )
+    channel_filter_result = MattermostChannelFilterResult(
+        message="summarize #town-square",
+        tags=[Tag(tag_key="channel_id", tag_value="town-square-id")],
+        no_results_message="no indexed Mattermost posts matched #town-square",
+    )
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            Packet(
+                placement=Placement(turn_index=0),
+                obj=AgentResponseDelta(content="private filtered answer"),
+            ),
+        ]
+    )
+
+    with (
+        _patched_chat_path(target=target, packets=packets) as calls,
+        patch(
+            "onyx.onyxbot.mattermost.handler.resolve_mattermost_channel_filters",
+            return_value=channel_filter_result,
+        ),
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=config,
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    stream_request = cast(
+        SendMessageRequest,
+        calls.handle_stream.call_args.kwargs["new_msg_req"],
+    )
+    assert stream_request.message == "summarize #town-square"
+    assert stream_request.internal_search_filters == BaseFilters(
+        source_type=[DocumentSource.MATTERMOST],
+        tags=[Tag(tag_key="channel_id", tag_value="town-square-id")],
+    )
+    assert client.created_posts == []
+    assert client.created_ephemeral_posts == [
+        {
+            "user_id": "sender-1",
+            "channel_id": "channel-1",
+            "root_id": "" if entrypoint == "slash" else "root-post-1",
+            "message": "no indexed Mattermost posts matched #town-square",
         }
     ]
 

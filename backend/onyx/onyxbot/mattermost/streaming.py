@@ -206,6 +206,7 @@ async def stream_mattermost_ephemeral_answer(
     before_external_update: Callable[[], bool] | None = None,
     before_ephemeral_delivery: Callable[[], bool] | None = None,
     after_ephemeral_delivery: Callable[[str], bool] | None = None,
+    no_results_message: str | None = None,
     props: dict[str, object] | None = None,
 ) -> MattermostStreamResult:
     """Render one Onyx answer and send it as a Mattermost ephemeral post."""
@@ -264,6 +265,9 @@ async def stream_mattermost_ephemeral_answer(
             props=props,
         )
         raise MattermostStreamVisibleError("Message ID is required")
+
+    if no_results_message and not top_documents and not citations:
+        answer = no_results_message
 
     final_message = format_mattermost_answer(
         ChatBasicResponse(
