@@ -49,10 +49,15 @@ from onyx.onyxbot.mattermost.mutations import (
     AuthoritativePlatformGatewayBridge,
     MattermostMutationAdapter,
 )
-from onyx.onyxbot.mattermost.placement import SeafileHierarchyEvidence
+from onyx.onyxbot.mattermost.placement import (
+    SeafileHierarchyEvidence,
+    _validate_hierarchy,
+)
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
+
+MATTERMOST_ATTACHMENT_PLACEMENT_HIERARCHY_REFRESH_SECONDS = 60
 
 
 def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
@@ -293,18 +298,24 @@ async def _run_bot(
                 config.mutation_gateway_factory
             )
             mutation_adapter = MattermostMutationAdapter(client, bridge)
-            cached_attachment_placement_hierarchy: SeafileHierarchyEvidence | None = (
-                None
+            cached_attachment_placement_hierarchy = (
+                _fetch_current_attachment_placement_hierarchy(bridge)
             )
 
             async def refresh_attachment_placement_hierarchy() -> None:
                 nonlocal cached_attachment_placement_hierarchy
                 while True:
-                    cached_attachment_placement_hierarchy = cast(
-                        SeafileHierarchyEvidence | None,
-                        bridge.get_mattermost_attachment_placement_hierarchy(),
+                    await asyncio.sleep(
+                        MATTERMOST_ATTACHMENT_PLACEMENT_HIERARCHY_REFRESH_SECONDS
                     )
-                    await asyncio.sleep(60)
+                    try:
+                        cached_attachment_placement_hierarchy = (
+                            _fetch_current_attachment_placement_hierarchy(bridge)
+                        )
+                    except RuntimeError:
+                        logger.exception(
+                            "Mattermost attachment hierarchy refresh failed; retaining last valid snapshot"
+                        )
 
             hierarchy_refresh_task = asyncio.create_task(
                 refresh_attachment_placement_hierarchy()
@@ -340,6 +351,24 @@ async def _run_bot(
         finally:
             if hierarchy_refresh_task is not None:
                 hierarchy_refresh_task.cancel()
+
+
+def _fetch_current_attachment_placement_hierarchy(
+    bridge: AuthoritativePlatformGatewayBridge,
+) -> SeafileHierarchyEvidence:
+    hierarchy = cast(
+        SeafileHierarchyEvidence | None,
+        bridge.get_mattermost_attachment_placement_hierarchy(),
+    )
+    if type(hierarchy) is not SeafileHierarchyEvidence:
+        raise RuntimeError("Mattermost attachment placement hierarchy is unavailable")
+    try:
+        _validate_hierarchy(hierarchy)
+    except ValueError:
+        raise RuntimeError(
+            "Mattermost attachment placement hierarchy is unavailable"
+        ) from None
+    return hierarchy
 
 
 def _build_managed_channel_config_resolver(
