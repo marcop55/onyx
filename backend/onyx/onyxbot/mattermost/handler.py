@@ -5,14 +5,19 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
-from onyx.configs.constants import MessageType, QAFeedbackType
+from onyx.configs.constants import (
+    DocumentSource,
+    MessageType,
+    QAFeedbackType,
+)
+from onyx.context.search.models import BaseFilters
 from onyx.db.chat import TERMINATED_RESPONSE_PLACEHOLDER, get_chat_message
 from onyx.db.mattermost_bot import (
     MattermostClaimOutcome,
@@ -40,6 +45,13 @@ from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import FileDescriptor
 from onyx.onyxbot.mattermost.attachments import save_mattermost_attachments
+from onyx.onyxbot.mattermost.channel_filters import (
+    MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+    MattermostChannelFilterClient,
+    MattermostChannelFilterResolutionError,
+    MattermostChannelFilterResult,
+    resolve_mattermost_channel_filters,
+)
 from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.context import (
     MattermostThreadContextFetchError,
@@ -325,6 +337,20 @@ async def handle_normalized_mattermost_event(
         if claim.claim_owner is None:
             raise RuntimeError("Mattermost ledger claim is missing its owner")
         claim_owner = claim.claim_owner
+        ledger_event = claim.event
+        if ledger_event.terminal_outcome is not None:
+            if (
+                ledger_event.terminal_outcome
+                == MattermostDeliveryTerminalOutcome.DELIVERED.value
+            ):
+                return complete_mattermost_answer_event(
+                    db_session,
+                    event_id=ledger_event.id,
+                    claim_owner=claim_owner,
+                    loaded_context_post_ids=frozenset(),
+                )
+            return False
+
         service_user = get_or_create_mattermost_service_account(db_session)
         file_descriptors = await _save_mattermost_attachments(
             client=client,
@@ -334,6 +360,24 @@ async def handle_normalized_mattermost_event(
             service_user_id=service_user.id,
         )
         if not event.text.strip():
+            return complete_mattermost_control_event(
+                db_session,
+                event_id=claim.event.id,
+                claim_owner=claim_owner,
+            )
+
+        try:
+            channel_filter_result = await resolve_mattermost_channel_filters(
+                event=event,
+                client=cast(MattermostChannelFilterClient, client),
+            )
+        except MattermostChannelFilterResolutionError:
+            await _post_failure(
+                client=client,
+                event=event,
+                message=MATTERMOST_CHANNEL_FILTER_DENIED_MESSAGE,
+                delivery_mode=MattermostResponseDeliveryMode.EPHEMERAL,
+            )
             return complete_mattermost_control_event(
                 db_session,
                 event_id=claim.event.id,
@@ -356,7 +400,11 @@ async def handle_normalized_mattermost_event(
             ),
         )
 
-        ledger_event = claim.event
+        response_style = (
+            channel_config.channel_config.get("response_style")
+            if channel_config is not None
+            else None
+        )
         delivery_mode = _resolve_delivery_mode(event=event, config=config)
         if ledger_event.delivery_mode is None:
             if not checkpoint_mattermost_delivery_mode(
@@ -369,23 +417,6 @@ async def handle_normalized_mattermost_event(
             ledger_event.delivery_mode = delivery_mode.value
         else:
             delivery_mode = MattermostResponseDeliveryMode(ledger_event.delivery_mode)
-
-        if ledger_event.terminal_outcome is not None:
-            if (
-                ledger_event.terminal_outcome
-                == MattermostDeliveryTerminalOutcome.DELIVERED.value
-            ):
-                return complete_mattermost_answer_event(
-                    db_session,
-                    event_id=ledger_event.id,
-                    claim_owner=claim_owner,
-                    loaded_context_post_ids=(
-                        thread_context.post_ids
-                        if thread_context is not None
-                        else frozenset()
-                    ),
-                )
-            return False
 
         if (
             ledger_event.onyx_assistant_message_id is not None
@@ -466,6 +497,8 @@ async def handle_normalized_mattermost_event(
                     else frozenset()
                 ),
                 renew_owner_fence=renew_owner_fence,
+                channel_filter_result=channel_filter_result,
+                response_style=response_style,
             )
 
         if post_id is None:
@@ -527,9 +560,8 @@ async def handle_normalized_mattermost_event(
                 thread_context=thread_context.text
                 if thread_context is not None
                 else None,
-                response_style=channel_config.channel_config.get("response_style")
-                if channel_config is not None
-                else None,
+                channel_filter_result=channel_filter_result,
+                response_style=response_style,
             ),
             db_session=db_session,
             event_id=ledger_event.id,
@@ -562,6 +594,7 @@ async def handle_normalized_mattermost_event(
                 post_id=post_id,
                 mutation_command=confirmed_mutation_command,
             ),
+            no_results_message=channel_filter_result.no_results_message,
         )
     except MattermostThreadTombstonedError:
         return False
@@ -701,6 +734,8 @@ async def _run_ephemeral_answer(
     thread_context_text: str | None,
     loaded_context_post_ids: frozenset[str],
     renew_owner_fence: Callable[[], bool],
+    channel_filter_result: MattermostChannelFilterResult | None,
+    response_style: str | None,
 ) -> bool:
     packets = _checkpoint_mattermost_turn_packets(
         packets=_stream_mattermost_answer_packets(
@@ -712,6 +747,8 @@ async def _run_ephemeral_answer(
             file_descriptors=file_descriptors,
             external_idempotency_key=f"mattermost:event:{ledger_event.id}",
             thread_context=thread_context_text,
+            channel_filter_result=channel_filter_result,
+            response_style=response_style,
         ),
         db_session=db_session,
         event_id=ledger_event.id,
@@ -750,6 +787,11 @@ async def _run_ephemeral_answer(
             claim_owner=claim_owner,
             terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERED,
             post_id=post_id,
+        ),
+        no_results_message=(
+            channel_filter_result.no_results_message
+            if channel_filter_result is not None
+            else None
         ),
         props={"onyx_event_key": str(ledger_event.id)},
     )
@@ -839,6 +881,7 @@ def _stream_mattermost_answer_packets(
     file_descriptors: list[FileDescriptor],
     external_idempotency_key: str,
     thread_context: str | None = None,
+    channel_filter_result: MattermostChannelFilterResult | None = None,
     response_style: str | None = None,
 ) -> Iterator[AnswerStreamPart]:
     if target.persona_id is None:
@@ -854,9 +897,12 @@ def _stream_mattermost_answer_packets(
         raise RuntimeError("Mattermost persona is invalid")
 
     new_message_request = SendMessageRequest(
-        message=event.text,
+        message=channel_filter_result.message if channel_filter_result else event.text,
         allowed_tool_ids=None,
         file_descriptors=file_descriptors,
+        internal_search_filters=_mattermost_channel_search_filters(
+            channel_filter_result
+        ),
         deep_research=False,
         origin=MessageOrigin.MATTERMOSTBOT,
         parent_message_id=target.parent_message_id,
@@ -882,6 +928,17 @@ def _stream_mattermost_answer_packets(
             CURRENT_USER_ID_CONTEXTVAR.reset(token)
 
     return _packets()
+
+
+def _mattermost_channel_search_filters(
+    channel_filter_result: MattermostChannelFilterResult | None,
+) -> BaseFilters | None:
+    if channel_filter_result is None or not channel_filter_result.tags:
+        return None
+    return BaseFilters(
+        source_type=[DocumentSource.MATTERMOST],
+        tags=channel_filter_result.tags,
+    )
 
 
 async def _save_mattermost_attachments(

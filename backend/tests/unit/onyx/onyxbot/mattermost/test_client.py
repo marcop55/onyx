@@ -268,6 +268,34 @@ async def test_is_channel_member_returns_false_when_user_was_removed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_channel_by_name_resolves_with_team_scope() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload={"id": "channel-id-1", "name": "town-square"},
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    channel = await client.get_channel_by_name(
+        team_id="team-1",
+        channel_name="town-square",
+    )
+
+    assert channel == {"id": "channel-id-1", "name": "town-square"}
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/teams/team-1/channels/name/town-square",
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_file_info_preserves_authoritative_metadata() -> None:
     session = _FakeSession(
         [
