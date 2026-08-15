@@ -69,6 +69,7 @@ class MattermostUserInfo:
     id: str
     username: str
     display_name: str
+    roles: str = ""
 
 
 @dataclass(frozen=True)

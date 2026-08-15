@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import uvicorn
 from fastapi import FastAPI
@@ -28,6 +29,10 @@ from onyx.onyxbot.mattermost.handler import (
     handle_normalized_mattermost_event,
 )
 from onyx.onyxbot.mattermost.listener import MattermostEventListener
+from onyx.onyxbot.mattermost.mutations import (
+    AuthoritativePlatformGatewayBridge,
+    MattermostMutationAdapter,
+)
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -98,6 +103,14 @@ async def _run_bot(
         request_timeout_seconds=config.request_timeout_seconds,
     ) as client:
         await client.get_me()
+        if config.mutation_gateway_factory is not None:
+            bridge = AuthoritativePlatformGatewayBridge.from_factory_spec(
+                config.mutation_gateway_factory
+            )
+            handler_config = replace(
+                handler_config,
+                mutation_adapter=MattermostMutationAdapter(client, bridge),
+            )
         listener = MattermostEventListener(client, config.listener_config)
         if ready_event is not None:
             ready_event.set()

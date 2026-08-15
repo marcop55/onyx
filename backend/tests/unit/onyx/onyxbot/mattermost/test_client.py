@@ -224,6 +224,7 @@ async def test_get_user_info_preserves_sender_attribution() -> None:
                     "first_name": "Ada",
                     "last_name": "Lovelace",
                     "nickname": "Countess",
+                    "roles": "system_user system_admin",
                 },
             )
         ]
@@ -239,6 +240,7 @@ async def test_get_user_info_preserves_sender_attribution() -> None:
     assert info.id == "user-1"
     assert info.username == "ada"
     assert info.display_name == "Ada Lovelace"
+    assert info.roles == "system_user system_admin"
     assert session.requests[0][0][:2] == (
         "GET",
         "https://mattermost.example.test/api/v4/users/user-1",
