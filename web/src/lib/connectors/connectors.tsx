@@ -198,6 +198,38 @@ export const connectorConfigs: Record<
     ],
     overrideDefaultFreq: 60 * 60 * 24,
   },
+  seafile: {
+    description: "Configure Seafile connector",
+    values: [
+      {
+        type: "text",
+        label: "Server URL",
+        name: "base_url",
+        optional: false,
+        description:
+          "Your Seafile server URL. Onyx uses the server API directly and does not require a local Seafile mirror.",
+      },
+      {
+        type: "list",
+        label: "Library Names",
+        name: "library_names",
+        optional: true,
+        description:
+          "Restrict indexing to specific Seafile library names. Leave empty to index every library visible to the API token.",
+      },
+    ],
+    advanced_values: [
+      {
+        type: "list",
+        label: "Excluded Paths",
+        name: "excluded_paths",
+        optional: true,
+        description:
+          "Glob patterns for paths to skip, e.g. /Archive/* or *.tmp.",
+      },
+    ],
+    overrideDefaultFreq: 60 * 60,
+  },
   lumapps: {
     description: "Configure LumApps connector",
     values: [
