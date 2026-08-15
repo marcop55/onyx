@@ -42,6 +42,8 @@ def _form_channel_config(
         "response_type": request.response_type.value,
         "include_source_previews": request.include_source_previews,
         "answer_filters": request.answer_filters,
+        "standard_answer_category_ids": request.standard_answer_category_ids,
+        "follow_up_tags": request.follow_up_tags,
         "disabled": request.disabled,
     }
 
@@ -112,6 +114,8 @@ def create_bot(
             "response_type": "citations",
             "include_source_previews": False,
             "answer_filters": [],
+            "standard_answer_category_ids": [],
+            "follow_up_tags": None,
             "disabled": False,
         },
         is_default=True,

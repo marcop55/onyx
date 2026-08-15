@@ -11,6 +11,8 @@ test("serializes channel config without duplicating agent instructions", () => {
         response_type: "quotes",
         include_source_previews: true,
         answer_only_when_sourced: true,
+        standard_answer_category_ids: "3, 5",
+        follow_up_tags: "support, urgent",
         respond_tag_only: true,
         disabled: false,
       },
@@ -29,6 +31,8 @@ test("serializes channel config without duplicating agent instructions", () => {
     response_type: "quotes",
     include_source_previews: true,
     answer_filters: ["well_answered_postfilter"],
+    standard_answer_category_ids: [3, 5],
+    follow_up_tags: ["support", "urgent"],
     disabled: false,
     is_default: false,
   });
@@ -47,6 +51,8 @@ test("serializes default config without a channel-specific identity", () => {
         response_type: "citations",
         include_source_previews: false,
         answer_only_when_sourced: false,
+        standard_answer_category_ids: "",
+        follow_up_tags: "",
         respond_tag_only: true,
         disabled: false,
       },
@@ -59,5 +65,7 @@ test("serializes default config without a channel-specific identity", () => {
   expect(body.channel_name).toBeNull();
   expect(body.persona_id).toBeNull();
   expect(body.response_style).toBe("default");
+  expect(body.standard_answer_category_ids).toEqual([]);
+  expect(body.follow_up_tags).toBeNull();
   expect(body.is_default).toBe(true);
 });

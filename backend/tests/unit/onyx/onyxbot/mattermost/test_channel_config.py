@@ -125,6 +125,8 @@ def test_replay_safe_managed_config_preserves_bounded_controls_only() -> None:
         "response_type": "citations",
         "include_source_previews": False,
         "answer_filters": [],
+        "standard_answer_category_ids": [],
+        "follow_up_tags": None,
         "disabled": False,
     }
     assert "system_prompt" not in config

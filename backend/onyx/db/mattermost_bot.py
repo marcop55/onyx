@@ -94,6 +94,8 @@ def _default_mattermost_channel_config(
     response_type: str = "citations",
     include_source_previews: bool = False,
     answer_filters: list[AllowedAnswerFilters] | None = None,
+    standard_answer_category_ids: list[int] | None = None,
+    follow_up_tags: list[str] | None = None,
     disabled: bool = False,
 ) -> ChannelConfig:
     return {
@@ -103,6 +105,8 @@ def _default_mattermost_channel_config(
         "response_type": response_type,
         "include_source_previews": include_source_previews,
         "answer_filters": answer_filters or [],
+        "standard_answer_category_ids": standard_answer_category_ids or [],
+        "follow_up_tags": follow_up_tags,
         "disabled": disabled,
     }
 

@@ -83,6 +83,9 @@ from onyx.onyxbot.mattermost.session import (
     MattermostChatTarget,
     get_or_create_mattermost_chat_target,
 )
+from onyx.onyxbot.mattermost.standard_answers import (
+    handle_mattermost_standard_answer_event,
+)
 from onyx.onyxbot.mattermost.streaming import (
     MATTERMOST_STREAM_PLACEHOLDER,
     MattermostLeaseLostError,
@@ -308,6 +311,15 @@ async def handle_normalized_mattermost_event(
         )
         if channel_config and channel_config.channel_config.get("disabled"):
             return False
+        if await handle_mattermost_standard_answer_event(
+            event=event,
+            bot_user_id=config.bot_user_id,
+            client=client,
+            db_session=db_session,
+            channel_config=channel_config.channel_config if channel_config else None,
+            instance_id=config.instance_id,
+        ):
+            return True
         target = get_or_create_mattermost_chat_target(
             db_session=db_session,
             event=event,
