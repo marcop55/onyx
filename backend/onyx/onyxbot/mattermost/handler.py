@@ -8,6 +8,7 @@ from inspect import iscoroutinefunction
 from typing import Any, cast
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from onyx.chat.models import AnswerStreamPart
@@ -36,10 +37,11 @@ from onyx.db.mattermost_bot import (
     get_loaded_mattermost_context_post_ids,
     get_mattermost_thread_mapping,
     record_mattermost_attachment,
+    record_mattermost_attachment_placement_proposal,
     renew_mattermost_event_lease,
     tombstone_mattermost_thread_mapping,
 )
-from onyx.db.models import ChatMessage, MattermostEventState
+from onyx.db.models import ChatMessage, MattermostAttachment, MattermostEventState
 from onyx.db.persona import get_persona_by_id
 from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.file_store.file_store import get_default_file_store
@@ -78,6 +80,11 @@ from onyx.onyxbot.mattermost.mutations import (
     MattermostMutationPermissionError,
     build_mattermost_confirmed_mutation_command,
     parse_mattermost_mutation_command,
+)
+from onyx.onyxbot.mattermost.placement import (
+    MattermostAttachmentPlacementInput,
+    SeafileHierarchyEvidence,
+    propose_mattermost_attachment_placement,
 )
 from onyx.onyxbot.mattermost.session import (
     MattermostChatTarget,
@@ -125,6 +132,9 @@ class MattermostHandlerConfig:
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
     interactive_signing_secret: str | None = None
     interactive_url: str | None = None
+    attachment_placement_hierarchy_provider: (
+        Callable[[NormalizedMattermostEvent], SeafileHierarchyEvidence | None] | None
+    ) = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -359,6 +369,12 @@ async def handle_normalized_mattermost_event(
             ledger_event=claim.event,
             service_user_id=service_user.id,
         )
+        placement_context = _record_mattermost_attachment_placement_proposals(
+            db_session=db_session,
+            event=event,
+            ledger_event=claim.event,
+            hierarchy_provider=config.attachment_placement_hierarchy_provider,
+        )
         if not event.text.strip():
             return complete_mattermost_control_event(
                 db_session,
@@ -512,6 +528,7 @@ async def handle_normalized_mattermost_event(
                 thread_context_text=thread_context.text
                 if thread_context is not None
                 else None,
+                placement_context=placement_context,
                 loaded_context_post_ids=(
                     thread_context.post_ids
                     if thread_context is not None
@@ -581,6 +598,7 @@ async def handle_normalized_mattermost_event(
                 thread_context=thread_context.text
                 if thread_context is not None
                 else None,
+                placement_context=placement_context,
                 channel_filter_result=channel_filter_result,
                 response_style=response_style,
             ),
@@ -753,6 +771,7 @@ async def _run_ephemeral_answer(
     ledger_event: MattermostEventState,
     claim_owner: UUID,
     thread_context_text: str | None,
+    placement_context: str | None,
     loaded_context_post_ids: frozenset[str],
     renew_owner_fence: Callable[[], bool],
     channel_filter_result: MattermostChannelFilterResult | None,
@@ -768,6 +787,7 @@ async def _run_ephemeral_answer(
             file_descriptors=file_descriptors,
             external_idempotency_key=f"mattermost:event:{ledger_event.id}",
             thread_context=thread_context_text,
+            placement_context=placement_context,
             channel_filter_result=channel_filter_result,
             response_style=response_style,
         ),
@@ -902,6 +922,7 @@ def _stream_mattermost_answer_packets(
     file_descriptors: list[FileDescriptor],
     external_idempotency_key: str,
     thread_context: str | None = None,
+    placement_context: str | None = None,
     channel_filter_result: MattermostChannelFilterResult | None = None,
     response_style: str | None = None,
 ) -> Iterator[AnswerStreamPart]:
@@ -941,6 +962,7 @@ def _stream_mattermost_answer_packets(
                 additional_context=_build_mattermost_context(
                     event,
                     thread_context=thread_context,
+                    placement_context=placement_context,
                     response_style=response_style,
                 ),
                 external_idempotency_key=external_idempotency_key,
@@ -985,6 +1007,7 @@ def _build_mattermost_context(
     event: NormalizedMattermostEvent,
     *,
     thread_context: str | None = None,
+    placement_context: str | None = None,
     response_style: str | None = None,
 ) -> str:
     base_context = (
@@ -1002,9 +1025,76 @@ def _build_mattermost_context(
             "question, use short paragraphs or at most five bullets, expand only "
             "on request, and preserve citations plus safety-critical detail."
         )
-    if thread_context is None:
+    extra_context = [
+        context
+        for context in (placement_context, thread_context)
+        if context is not None
+    ]
+    if not extra_context:
         return base_context
-    return base_context + "\n\n" + thread_context
+    return base_context + "\n\n" + "\n\n".join(extra_context)
+
+
+def _record_mattermost_attachment_placement_proposals(
+    *,
+    db_session: Session,
+    event: NormalizedMattermostEvent,
+    ledger_event: MattermostEventState,
+    hierarchy_provider: Callable[
+        [NormalizedMattermostEvent], SeafileHierarchyEvidence | None
+    ]
+    | None,
+) -> str | None:
+    if hierarchy_provider is None or not event.file_ids:
+        return None
+    hierarchy = hierarchy_provider(event)
+    if hierarchy is None:
+        return None
+    attachments = db_session.scalars(
+        select(MattermostAttachment).where(
+            MattermostAttachment.event_id == ledger_event.id,
+            MattermostAttachment.mattermost_file_id.in_(event.file_ids),
+        )
+    ).all()
+    proposal_lines: list[str] = []
+    for attachment in attachments:
+        proposal = propose_mattermost_attachment_placement(
+            attachment=MattermostAttachmentPlacementInput(
+                attachment_id=attachment.id,
+                mattermost_file_id=attachment.mattermost_file_id,
+                source_post_id=attachment.source_post_id,
+                uploader_user_id=attachment.uploader_user_id,
+                channel_id=attachment.channel_id,
+                root_post_id=attachment.root_post_id,
+                filename=attachment.filename,
+                mime_type=attachment.mime_type,
+                size_bytes=attachment.size_bytes,
+                sha256=attachment.sha256,
+                file_store_id=attachment.file_store_id,
+                user_file_id=attachment.user_file_id,
+                content_text=event.text,
+            ),
+            hierarchy=hierarchy,
+            request_is_system_admin=False,
+        )
+        record_mattermost_attachment_placement_proposal(
+            db_session,
+            proposal=proposal,
+        )
+        proposal_lines.append(
+            f"- {attachment.filename}: propose {proposal.proposed_path}; "
+            f"confidence {proposal.confidence:.2f}; {proposal.rationale}; "
+            f"temporary_only={proposal.should_remain_temporary}; "
+            f"hierarchy_revision={proposal.hierarchy_root_revision}"
+        )
+    if not proposal_lines:
+        return None
+    return (
+        "Mattermost attachment placement proposals were recorded without Seafile "
+        "transport. Present these as recommendations only; system_admin signed "
+        "confirmation is required before any Seafile write.\n"
+        + "\n".join(proposal_lines)
+    )
 
 
 def _build_final_action_props_factory(

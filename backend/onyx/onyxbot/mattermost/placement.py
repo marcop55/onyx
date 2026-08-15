@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from uuid import UUID
@@ -119,6 +119,22 @@ class MattermostPromotionPreflightEvidence:
 
 
 @dataclass(frozen=True)
+class MattermostAttachmentPromotionConfirmation:
+    confirmed: bool
+    confirmer_user_id: str
+    mattermost_file_id: str
+    source_post_id: str
+    uploader_user_id: str
+    channel_id: str
+    root_post_id: str | None
+    proposed_path: str
+    hierarchy_root_revision: str
+    attachment_sha256: str | None
+    destination_revision: str | None
+    conflict_paths: Sequence[str]
+
+
+@dataclass(frozen=True)
 class MattermostAttachmentPromotionReceipt:
     readback_file_id: str
     readback_revision: str
@@ -183,10 +199,13 @@ async def promote_mattermost_attachment_proposal(
     attachment: MattermostAttachmentPlacementInput,
     proposal: MattermostAttachmentPlacementProposal,
     preflight: MattermostPromotionPreflightEvidence,
+    confirmation: MattermostAttachmentPromotionConfirmation,
     mattermost: MattermostIdentityLookup,
     gateway: ControlledSeafileMutationGateway,
     read_back: Callable[[], Mapping[str, str | None]],
     freshness_check: Callable[[], str],
+    membership_check: Callable[[str, str], Awaitable[bool]] | None = None,
+    bot_user_id: str | None = None,
 ) -> MattermostAttachmentPromotionReceipt:
     """Execute one confirmed, guarded attachment promotion through typed APIs."""
 
@@ -194,7 +213,25 @@ async def promote_mattermost_attachment_proposal(
         attachment=attachment,
         proposal=proposal,
         preflight=preflight,
+        confirmation=confirmation,
     )
+    if event.user_id != confirmation.confirmer_user_id:
+        raise MattermostAttachmentPromotionError(
+            "Mattermost confirmation user changed before promotion"
+        )
+    if membership_check is not None:
+        if bot_user_id is None:
+            raise MattermostAttachmentPromotionError(
+                "Bot identity is required for promotion membership checks"
+            )
+        if not await membership_check(event.channel_id, bot_user_id):
+            raise MattermostAttachmentPromotionError(
+                "Mattermost bot membership changed before promotion"
+            )
+        if not await membership_check(event.channel_id, attachment.uploader_user_id):
+            raise MattermostAttachmentPromotionError(
+                "Mattermost sender membership changed before promotion"
+            )
     request = SeafileActionRequest(
         action=SeafileActionType.CREATE,
         repo_id=proposal.library_id,
@@ -204,7 +241,7 @@ async def promote_mattermost_attachment_proposal(
         expected_revision=None,
         content=attachment.file_store_id,
         destination_path=None,
-        confirmed=True,
+        confirmed=confirmation.confirmed,
         scope_prefix=f"/{proposal.proposed_root}",
     )
     await MattermostMutationAdapter(mattermost, gateway).route(event, request)
@@ -255,7 +292,12 @@ def _validate_promotion_preconditions(
     attachment: MattermostAttachmentPlacementInput,
     proposal: MattermostAttachmentPlacementProposal,
     preflight: MattermostPromotionPreflightEvidence,
+    confirmation: MattermostAttachmentPromotionConfirmation,
 ) -> None:
+    if not confirmation.confirmed:
+        raise MattermostAttachmentPromotionError(
+            "Fresh signed Mattermost confirmation is required for promotion"
+        )
     if proposal.should_remain_temporary:
         raise MattermostAttachmentPromotionError(
             "Temporary or conflicted attachments cannot be promoted"
@@ -294,6 +336,21 @@ def _validate_promotion_preconditions(
     if proposal.identity != expected_identity:
         raise MattermostAttachmentPromotionError(
             "Mattermost attachment identity changed before promotion"
+        )
+    if (
+        confirmation.mattermost_file_id != proposal.identity.mattermost_file_id
+        or confirmation.source_post_id != proposal.identity.source_post_id
+        or confirmation.uploader_user_id != proposal.identity.uploader_user_id
+        or confirmation.channel_id != proposal.identity.channel_id
+        or confirmation.root_post_id != proposal.identity.root_post_id
+        or confirmation.proposed_path != proposal.proposed_path
+        or confirmation.hierarchy_root_revision != proposal.hierarchy_root_revision
+        or confirmation.attachment_sha256 != attachment.sha256
+        or confirmation.destination_revision != preflight.destination_revision
+        or tuple(confirmation.conflict_paths) != tuple(preflight.conflict_paths)
+    ):
+        raise MattermostAttachmentPromotionError(
+            "Mattermost confirmation does not match the current proposal evidence"
         )
 
 

@@ -104,6 +104,7 @@ class AuthoritativePlatformGatewayBridge:
         mutate = getattr(gateway, "mutate", None)
         if not callable(mutate):
             raise ValueError("configured platform gateway must expose mutate")
+        self._gateway = gateway
         required = (
             "MattermostMutationContext",
             "SeafileActionRequest",
@@ -160,6 +161,16 @@ class AuthoritativePlatformGatewayBridge:
             scope_prefix=request.scope_prefix,
         )
         return self._gateway_mutate(platform_context, platform_request)
+
+    def get_mattermost_attachment_placement_hierarchy(self) -> Any | None:
+        hierarchy = getattr(
+            self._gateway,
+            "get_mattermost_attachment_placement_hierarchy",
+            None,
+        )
+        if not callable(hierarchy):
+            return None
+        return hierarchy()
 
 
 class MattermostMutationAdapter:

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
 
 from onyx.db.mattermost_bot import mattermost_attachment_placement_proposal_identity
+from onyx.db.models import MattermostEventState
+from onyx.onyxbot.mattermost.handler import (
+    _record_mattermost_attachment_placement_proposals,
+)
 from onyx.onyxbot.mattermost.models import (
     MattermostNormalizedEventType,
     MattermostUserInfo,
@@ -18,6 +24,7 @@ from onyx.onyxbot.mattermost.mutations import (
 from onyx.onyxbot.mattermost.placement import (
     APPROVED_ONEQODE_ROOTS,
     MattermostAttachmentPlacementInput,
+    MattermostAttachmentPromotionConfirmation,
     MattermostAttachmentPromotionError,
     MattermostPromotionPreflightEvidence,
     SeafileHierarchyEvidence,
@@ -115,6 +122,27 @@ def _proposal():
     )
 
 
+def _confirmation(
+    *,
+    confirmed: bool = True,
+    attachment_sha256: str | None = "a" * 64,
+) -> MattermostAttachmentPromotionConfirmation:
+    return MattermostAttachmentPromotionConfirmation(
+        confirmed=confirmed,
+        confirmer_user_id="user-1",
+        mattermost_file_id="file-1",
+        source_post_id="post-1",
+        uploader_user_id="user-1",
+        channel_id="channel-1",
+        root_post_id="root-1",
+        proposed_path="/Projects/Apollo Quote FINAL.pdf",
+        hierarchy_root_revision="root-rev-1",
+        attachment_sha256=attachment_sha256,
+        destination_revision=None,
+        conflict_paths=(),
+    )
+
+
 def test_normal_member_gets_sourced_recommendation_without_seafile_transport() -> None:
     seafile_transport_calls: list[str] = []
 
@@ -148,6 +176,46 @@ def test_normal_member_gets_sourced_recommendation_without_seafile_transport() -
     assert proposal.identity.sha256 == "a" * 64
     assert proposal.duplicate_conflict_evidence.same_name_paths == []
     assert "Project Apollo" in proposal.rationale
+
+
+def test_production_attachment_path_records_proposal_context_without_transport() -> (
+    None
+):
+    db_session = MagicMock()
+    db_session.scalars.return_value.all.return_value = [
+        SimpleNamespace(
+            id=42,
+            mattermost_file_id="file-1",
+            source_post_id="post-1",
+            uploader_user_id="user-1",
+            channel_id="channel-1",
+            root_post_id="root-1",
+            filename="Apollo Quote.pdf",
+            mime_type="application/pdf",
+            size_bytes=1234,
+            sha256="a" * 64,
+            file_store_id="mattermost/instance/channel-1/file-1",
+            user_file_id=UUID("00000000-0000-0000-0000-000000000123"),
+        )
+    ]
+    recorded: list[object] = []
+
+    with patch(
+        "onyx.onyxbot.mattermost.handler.record_mattermost_attachment_placement_proposal",
+        side_effect=lambda _db_session, *, proposal: recorded.append(proposal),
+    ):
+        context = _record_mattermost_attachment_placement_proposals(
+            db_session=db_session,
+            event=_event(),
+            ledger_event=MattermostEventState(id=1),
+            hierarchy_provider=lambda _event: _hierarchy(),
+        )
+
+    assert len(recorded) == 1
+    assert context is not None
+    assert "without Seafile transport" in context
+    assert "/Inbox/Apollo Quote.pdf" in context
+    assert "system_admin signed confirmation" in context
 
 
 def test_low_confidence_unparseable_attachment_stays_temporary() -> None:
@@ -234,6 +302,7 @@ async def test_non_admin_promotion_is_denied_with_zero_seafile_transport() -> No
                 attachment_sha256="a" * 64,
                 conflict_paths=(),
             ),
+            confirmation=_confirmation(),
             mattermost=FakeMattermost("system_user"),
             gateway=gateway,
             read_back=lambda: {
@@ -263,7 +332,35 @@ async def test_stale_confirmation_rechecks_checksum_before_gateway() -> None:
                 attachment_sha256="b" * 64,
                 conflict_paths=(),
             ),
+            confirmation=_confirmation(attachment_sha256="b" * 64),
             mattermost=FakeMattermost("system_admin"),
+            gateway=gateway,
+            read_back=lambda: {},
+            freshness_check=lambda: "fresh:index-attempt-1",
+        )
+
+    assert gateway.calls == []
+
+
+@pytest.mark.asyncio
+async def test_attachment_promotion_requires_fresh_signed_matching_confirmation() -> (
+    None
+):
+    gateway = RecordingGateway()
+
+    with pytest.raises(MattermostAttachmentPromotionError, match="confirmation"):
+        await promote_mattermost_attachment_proposal(
+            event=_event(),
+            attachment=_attachment_input(),
+            proposal=_proposal(),
+            preflight=MattermostPromotionPreflightEvidence(
+                hierarchy_root_revision="root-rev-1",
+                destination_revision=None,
+                attachment_sha256="a" * 64,
+                conflict_paths=(),
+            ),
+            confirmation=_confirmation(confirmed=False),
+            mattermost=FakeMattermost("system_user system_admin"),
             gateway=gateway,
             read_back=lambda: {},
             freshness_check=lambda: "fresh:index-attempt-1",
@@ -288,6 +385,7 @@ async def test_system_admin_promotion_requires_readback_audit_rollback_and_fresh
             attachment_sha256="a" * 64,
             conflict_paths=(),
         ),
+        confirmation=_confirmation(),
         mattermost=FakeMattermost("system_user system_admin"),
         gateway=gateway,
         read_back=lambda: {
@@ -315,3 +413,36 @@ async def test_system_admin_promotion_requires_readback_audit_rollback_and_fresh
         "revision_id": "rev-2",
     }
     assert receipt.ingestion_freshness_proof == "fresh:index-attempt-1"
+
+
+@pytest.mark.asyncio
+async def test_promotion_rechecks_bot_and_sender_membership_before_gateway() -> None:
+    gateway = RecordingGateway()
+    membership_calls: list[tuple[str, str]] = []
+
+    async def membership_check(channel_id: str, user_id: str) -> bool:
+        membership_calls.append((channel_id, user_id))
+        return user_id != "user-1"
+
+    with pytest.raises(MattermostAttachmentPromotionError, match="sender membership"):
+        await promote_mattermost_attachment_proposal(
+            event=_event(),
+            attachment=_attachment_input(),
+            proposal=_proposal(),
+            preflight=MattermostPromotionPreflightEvidence(
+                hierarchy_root_revision="root-rev-1",
+                destination_revision=None,
+                attachment_sha256="a" * 64,
+                conflict_paths=(),
+            ),
+            confirmation=_confirmation(),
+            mattermost=FakeMattermost("system_user system_admin"),
+            gateway=gateway,
+            read_back=lambda: {},
+            freshness_check=lambda: "fresh:index-attempt-1",
+            membership_check=membership_check,
+            bot_user_id="bot-1",
+        )
+
+    assert membership_calls == [("channel-1", "bot-1"), ("channel-1", "user-1")]
+    assert gateway.calls == []

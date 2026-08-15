@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -47,6 +48,7 @@ from onyx.onyxbot.mattermost.mutations import (
     AuthoritativePlatformGatewayBridge,
     MattermostMutationAdapter,
 )
+from onyx.onyxbot.mattermost.placement import SeafileHierarchyEvidence
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -242,11 +244,27 @@ async def _run_bot(
     ) as client:
         await client.get_me()
         mutation_adapter = None
+        attachment_placement_hierarchy_provider: (
+            Callable[[NormalizedMattermostEvent], SeafileHierarchyEvidence | None]
+            | None
+        ) = None
         if config.mutation_gateway_factory is not None:
             bridge = AuthoritativePlatformGatewayBridge.from_factory_spec(
                 config.mutation_gateway_factory
             )
             mutation_adapter = MattermostMutationAdapter(client, bridge)
+
+            def bridge_attachment_placement_hierarchy_provider(
+                _event: NormalizedMattermostEvent,
+            ) -> SeafileHierarchyEvidence | None:
+                return cast(
+                    SeafileHierarchyEvidence | None,
+                    bridge.get_mattermost_attachment_placement_hierarchy(),
+                )
+
+            attachment_placement_hierarchy_provider = (
+                bridge_attachment_placement_hierarchy_provider
+            )
         listener = MattermostEventListener(client, listener_config)
         if ready_event is not None:
             ready_event.set()
@@ -255,6 +273,9 @@ async def _run_bot(
                 handler_config = replace(
                     _build_handler_config(config, db_session),
                     mutation_adapter=mutation_adapter,
+                    attachment_placement_hierarchy_provider=(
+                        attachment_placement_hierarchy_provider
+                    ),
                 )
                 await handle_normalized_mattermost_event(
                     event=event,
