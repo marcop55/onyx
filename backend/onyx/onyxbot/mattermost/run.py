@@ -279,6 +279,7 @@ def _build_handler_config(
         ephemeral_response_channel_ids=ephemeral_response_channel_ids,
         interactive_signing_secret=config.token,
         interactive_url=_interactive_action_url(config),
+        bot_user_id=config.listener_config.bot_user_id,
     )
 
 

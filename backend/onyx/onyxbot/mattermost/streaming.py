@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -27,7 +27,7 @@ MATTERMOST_STREAM_FAILURE_SUFFIX = (
     "Onyx stopped before it finished this answer. Try again later."
 )
 MATTERMOST_MIN_UPDATE_CHARS = 80
-MattermostFinalPropsFactory = Callable[[int, str], dict[str, object] | None]
+MattermostFinalPropsFactory = Callable[[int, str], Awaitable[dict[str, object] | None]]
 
 
 class MattermostStreamVisibleError(RuntimeError):
@@ -78,6 +78,8 @@ class MattermostStreamingClient(Protocol):
     async def get_file_info(self, file_id: str) -> MattermostFileInfo: ...
 
     async def get_user_info(self, user_id: str) -> MattermostUserInfo: ...
+
+    async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool: ...
 
     async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]: ...
 
@@ -192,7 +194,7 @@ async def stream_mattermost_answer(
         post_id=post_id,
         message=final_message,
         sent_messages=sent_messages,
-        props=final_props_factory(message_id, final_message)
+        props=await final_props_factory(message_id, final_message)
         if final_props_factory is not None
         else None,
     )

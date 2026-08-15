@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from typing import Any
@@ -56,6 +56,7 @@ from onyx.onyxbot.mattermost.models import (
     MattermostNormalizedEventType,
     MattermostPost,
     MattermostResponseDeliveryMode,
+    MattermostUserInfo,
     NormalizedMattermostEvent,
 )
 from onyx.onyxbot.mattermost.mutations import (
@@ -113,6 +114,7 @@ class MattermostHandlerConfig:
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
     interactive_signing_secret: str | None = None
     interactive_url: str | None = None
+    bot_user_id: str | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -543,6 +545,7 @@ async def handle_normalized_mattermost_event(
             before_external_update=renew_owner_fence,
             final_props_factory=_build_final_action_props_factory(
                 config=config,
+                client=client,
                 event=event,
                 post_id=post_id,
                 mutation_command=confirmed_mutation_command,
@@ -887,17 +890,27 @@ def _build_mattermost_context(
 def _build_final_action_props_factory(
     *,
     config: MattermostHandlerConfig,
+    client: MattermostStreamingClient,
     event: NormalizedMattermostEvent,
     post_id: str,
     mutation_command: str | None = None,
-) -> Callable[[int, str], dict[str, object] | None] | None:
+) -> Callable[[int, str], Awaitable[dict[str, object] | None]] | None:
     if config.interactive_signing_secret is None:
         return None
 
-    def final_action_props(
+    async def final_action_props(
         message_id: int,
         final_message: str,
     ) -> dict[str, object] | None:
+        authorized_mutation_command = None
+        if mutation_command is not None and config.mutation_adapter is not None:
+            current_user = await _authorize_mutation_attachment_user(
+                client=client,
+                event=event,
+                bot_user_id=config.bot_user_id,
+            )
+            if current_user is not None:
+                authorized_mutation_command = mutation_command
         return build_mattermost_answer_action_props(
             signing_secret=config.interactive_signing_secret or "",
             interactive_url=config.interactive_url,
@@ -908,12 +921,37 @@ def _build_final_action_props_factory(
             answer_message_id=message_id,
             requester_user_id=event.user_id,
             sources=_extract_source_lines(final_message),
-            mutation_command=mutation_command
-            if config.mutation_adapter is not None
-            else None,
+            mutation_command=authorized_mutation_command,
         )
 
     return final_action_props
+
+
+async def _authorize_mutation_attachment_user(
+    *,
+    client: MattermostStreamingClient,
+    event: NormalizedMattermostEvent,
+    bot_user_id: str | None,
+) -> MattermostUserInfo | None:
+    if bot_user_id is None:
+        return None
+    try:
+        if not await client.is_channel_member(
+            channel_id=event.channel_id, user_id=bot_user_id
+        ):
+            return None
+        if not await client.is_channel_member(
+            channel_id=event.channel_id, user_id=event.user_id
+        ):
+            return None
+        current_user = await client.get_user_info(event.user_id)
+    except Exception:
+        return None
+    if current_user.id != event.user_id:
+        return None
+    if "system_admin" not in current_user.roles.split():
+        return None
+    return current_user
 
 
 def _extract_source_lines(final_message: str) -> tuple[str, ...]:
