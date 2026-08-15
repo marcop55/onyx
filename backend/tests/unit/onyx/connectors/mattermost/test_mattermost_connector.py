@@ -18,6 +18,7 @@ class FakeMattermostHistoryClient:
         channels: list[MattermostChannel],
         posts_by_channel: dict[str, list[MattermostPost]],
         member_pairs: set[tuple[str, str]],
+        threads_by_root: dict[str, list[MattermostPost]] | None = None,
         files_by_id: dict[str, MattermostFileMetadata] | None = None,
         failing_channels: set[str] | None = None,
     ) -> None:
@@ -25,9 +26,11 @@ class FakeMattermostHistoryClient:
         self.channels = channels
         self.posts_by_channel = posts_by_channel
         self.member_pairs = member_pairs
+        self.threads_by_root = threads_by_root or {}
         self.files_by_id = files_by_id or {}
         self.failing_channels = failing_channels or set()
         self.membership_checks: list[tuple[str, str]] = []
+        self.thread_fetches: list[tuple[str, str]] = []
 
     def validate(self) -> None:
         return None
@@ -46,6 +49,20 @@ class FakeMattermostHistoryClient:
         if channel_id in self.failing_channels:
             raise RuntimeError("mattermost history unavailable")
         for post in self.posts_by_channel[channel_id]:
+            yield post
+
+    def get_thread_posts(
+        self, channel_id: str, root_post_id: str
+    ) -> Iterable[MattermostPost]:
+        self.thread_fetches.append((channel_id, root_post_id))
+        thread_posts = self.threads_by_root.get(root_post_id)
+        if thread_posts is None:
+            thread_posts = [
+                post
+                for post in self.posts_by_channel[channel_id]
+                if (post.root_id or post.id) == root_post_id
+            ]
+        for post in thread_posts:
             yield post
 
     def get_file_metadata(self, file_id: str) -> MattermostFileMetadata:
@@ -222,6 +239,80 @@ def test_mattermost_connector_indexes_deleted_posts_as_stable_tombstones() -> No
     assert doc.id == "mattermost:team-1:chan-1:root-1"
     assert doc.sections[0].text == "alice: [deleted Mattermost post root-1]"
     assert doc.doc_updated_at == datetime.fromtimestamp(2, tz=timezone.utc)
+
+
+def test_mattermost_incremental_reply_poll_reconstructs_complete_stable_thread() -> (
+    None
+):
+    root_post = MattermostPost(
+        id="root-1",
+        channel_id="chan-1",
+        user_id="alice",
+        message="original launch plan",
+        create_at=1_000,
+        update_at=1_000,
+        file_ids=("file-1",),
+    )
+    reply_post = MattermostPost(
+        id="reply-1",
+        channel_id="chan-1",
+        user_id="bob",
+        message="late edit only",
+        root_id="root-1",
+        create_at=1_500,
+        edit_at=2_500,
+    )
+    deleted_reply = MattermostPost(
+        id="reply-2",
+        channel_id="chan-1",
+        user_id="carol",
+        message="deleted details",
+        root_id="root-1",
+        create_at=1_600,
+        delete_at=2_700,
+    )
+    fake_client = FakeMattermostHistoryClient(
+        channels=[MattermostChannel(id="chan-1", name="town-square", team_id="team-1")],
+        posts_by_channel={"chan-1": [reply_post]},
+        threads_by_root={"root-1": [root_post, reply_post, deleted_reply]},
+        files_by_id={
+            "file-1": MattermostFileMetadata(
+                id="file-1",
+                post_id="root-1",
+                user_id="alice",
+                filename="launch.pdf",
+                mime_type="application/pdf",
+                size_bytes=456,
+            )
+        },
+        member_pairs={
+            ("chan-1", "bot-user"),
+            ("chan-1", "alice"),
+            ("chan-1", "bob"),
+            ("chan-1", "carol"),
+        },
+    )
+    connector = MattermostConnector(batch_size=10, client=fake_client)
+
+    documents = [
+        item for item in _collect_documents(connector) if isinstance(item, Document)
+    ]
+
+    assert fake_client.thread_fetches == [("chan-1", "root-1")]
+    assert len(documents) == 1
+    doc = documents[0]
+    assert doc.id == "mattermost:team-1:chan-1:root-1"
+    assert doc.sections[0].link == "https://mattermost.example.com/team-1/pl/root-1"
+    assert doc.sections[0].text == (
+        "alice: original launch plan\n"
+        "bob: late edit only\n"
+        "carol: [deleted Mattermost post reply-2]"
+    )
+    assert doc.metadata["post_ids"] == ["root-1", "reply-1", "reply-2"]
+    assert doc.metadata["sender_user_ids"] == ["alice", "bob", "carol"]
+    assert doc.metadata["file_ids"] == ["file-1"]
+    assert doc.doc_created_at == datetime.fromtimestamp(1, tz=timezone.utc)
+    assert doc.doc_updated_at == datetime.fromtimestamp(2.7, tz=timezone.utc)
 
 
 def test_mattermost_connector_emits_failure_for_history_fetch_errors() -> None:

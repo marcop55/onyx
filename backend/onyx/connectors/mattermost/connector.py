@@ -56,6 +56,10 @@ class MattermostHistoryClient(Protocol):
         self, channel_id: str, *, start: float | None, end: float | None
     ) -> Iterable[MattermostPost]: ...
 
+    def get_thread_posts(
+        self, channel_id: str, root_post_id: str
+    ) -> Iterable[MattermostPost]: ...
+
     def get_file_metadata(self, file_id: str) -> MattermostFileMetadata: ...
 
 
@@ -152,6 +156,12 @@ class MattermostApiClient:
             if len(order_payload) < 200 or not yielded:
                 return
             page += 1
+
+    def get_thread_posts(
+        self, channel_id: str, root_post_id: str
+    ) -> Iterator[MattermostPost]:
+        payload = self._request_object("GET", f"/api/v4/posts/{root_post_id}/thread")
+        yield from _post_list_payload_to_posts(payload, expected_channel_id=channel_id)
 
     def get_file_metadata(self, file_id: str) -> MattermostFileMetadata:
         payload = self._request_object("GET", f"/api/v4/files/{file_id}/info")
@@ -283,7 +293,8 @@ class MattermostConnector(LoadConnector, PollConnector):
         self, channel: MattermostChannel, posts: Iterable[MattermostPost]
     ) -> Iterator[Document]:
         assert self.client is not None
-        grouped_posts: dict[str, list[MattermostPost]] = {}
+        root_post_ids: list[str] = []
+        seen_root_post_ids: set[str] = set()
         seen_post_ids: set[str] = set()
         for post in posts:
             if post.id in seen_post_ids:
@@ -297,15 +308,24 @@ class MattermostConnector(LoadConnector, PollConnector):
                     channel.id,
                 )
                 continue
-            grouped_posts.setdefault(canonical_root_post_id(post), []).append(post)
+            root_post_id = canonical_root_post_id(post)
+            if root_post_id in seen_root_post_ids:
+                continue
+            seen_root_post_ids.add(root_post_id)
+            root_post_ids.append(root_post_id)
 
-        for root_post_id, thread_posts in grouped_posts.items():
-            ordered_posts = sorted(
-                thread_posts,
-                key=lambda post: (
-                    post.create_at or post.update_at or post.delete_at or 0
-                ),
-            )
+        for root_post_id in root_post_ids:
+            thread_posts = self.client.get_thread_posts(channel.id, root_post_id)
+            filtered_thread_posts = self._current_member_posts(channel, thread_posts)
+            if not any(post.id == root_post_id for post in filtered_thread_posts):
+                logger.warning(
+                    "Skipping Mattermost thread %s because the current root post was unavailable or unauthorized",
+                    root_post_id,
+                )
+                continue
+            ordered_posts = _order_thread_posts(root_post_id, filtered_thread_posts)
+            if not ordered_posts:
+                continue
             yield _thread_posts_to_document(
                 base_url=self.base_url,
                 channel=channel,
@@ -313,6 +333,70 @@ class MattermostConnector(LoadConnector, PollConnector):
                 posts=ordered_posts,
                 client=self.client,
             )
+
+    def _current_member_posts(
+        self, channel: MattermostChannel, posts: Iterable[MattermostPost]
+    ) -> list[MattermostPost]:
+        assert self.client is not None
+        current_member_posts: list[MattermostPost] = []
+        seen_post_ids: set[str] = set()
+        for post in posts:
+            if post.id in seen_post_ids:
+                continue
+            seen_post_ids.add(post.id)
+            if post.channel_id != channel.id:
+                logger.warning(
+                    "Skipping Mattermost post %s because it belongs to channel %s instead of %s",
+                    post.id,
+                    post.channel_id,
+                    channel.id,
+                )
+                continue
+            if not self.client.is_channel_member(channel.id, post.user_id):
+                logger.warning(
+                    "Skipping Mattermost post %s because sender %s is not a current member of channel %s",
+                    post.id,
+                    post.user_id,
+                    channel.id,
+                )
+                continue
+            current_member_posts.append(post)
+        return current_member_posts
+
+
+def _order_thread_posts(
+    root_post_id: str, posts: list[MattermostPost]
+) -> list[MattermostPost]:
+    return sorted(
+        posts,
+        key=lambda post: (
+            post.id != root_post_id,
+            post.create_at or post.update_at or post.delete_at or 0,
+            post.id,
+        ),
+    )
+
+
+def _post_list_payload_to_posts(
+    payload: dict[str, Any], *, expected_channel_id: str
+) -> Iterator[MattermostPost]:
+    posts_payload = payload.get("posts")
+    order_payload = payload.get("order")
+    if not isinstance(posts_payload, dict) or not isinstance(order_payload, list):
+        raise ConnectorValidationError("Mattermost posts payload is invalid")
+    for post_id in reversed([item for item in order_payload if isinstance(item, str)]):
+        raw_post = posts_payload.get(post_id)
+        if not isinstance(raw_post, dict):
+            continue
+        post = _post_from_payload(raw_post)
+        if post.channel_id != expected_channel_id:
+            logger.warning(
+                "Skipping Mattermost post %s from unexpected channel %s",
+                post.id,
+                post.channel_id,
+            )
+            continue
+        yield post
 
 
 def _channel_to_hierarchy_node(
