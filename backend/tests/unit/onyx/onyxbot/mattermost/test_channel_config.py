@@ -122,6 +122,9 @@ def test_replay_safe_managed_config_preserves_bounded_controls_only() -> None:
         "channel_name": "Design",
         "respond_tag_only": True,
         "response_style": "orka_concise",
+        "response_type": "citations",
+        "include_source_previews": False,
+        "answer_filters": [],
         "disabled": False,
     }
     assert "system_prompt" not in config

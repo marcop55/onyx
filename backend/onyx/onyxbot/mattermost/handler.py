@@ -88,6 +88,8 @@ from onyx.onyxbot.mattermost.streaming import (
     MattermostLeaseLostError,
     MattermostStreamingClient,
     MattermostStreamVisibleError,
+    bound_mattermost_ephemeral_rendered_message,
+    deliver_mattermost_rendered_messages,
     stream_mattermost_answer,
     stream_mattermost_ephemeral_answer,
 )
@@ -459,8 +461,6 @@ async def handle_normalized_mattermost_event(
                 )
             if ledger_event.mattermost_post_id is None:
                 return False
-            if not renew_owner_fence():
-                return False
             final_props_factory = _build_final_action_props_factory(
                 config=config,
                 client=client,
@@ -468,9 +468,13 @@ async def handle_normalized_mattermost_event(
                 post_id=ledger_event.mattermost_post_id,
                 mutation_command=confirmed_mutation_command,
             )
-            await client.update_post(
+            delivered_post_ids = await deliver_mattermost_rendered_messages(
+                client=client,
+                channel_id=event.channel_id,
+                root_id=_response_root_id(event),
                 post_id=ledger_event.mattermost_post_id,
-                message=ledger_event.rendered_message,
+                rendered_message=ledger_event.rendered_message,
+                before_external_update=renew_owner_fence,
                 props=await final_props_factory(
                     ledger_event.onyx_assistant_message_id,
                     ledger_event.rendered_message,
@@ -478,7 +482,7 @@ async def handle_normalized_mattermost_event(
                 if final_props_factory is not None
                 else None,
             )
-            if not complete_mattermost_answer_event(
+            completed = complete_mattermost_answer_event(
                 db_session,
                 event_id=ledger_event.id,
                 claim_owner=claim_owner,
@@ -487,15 +491,16 @@ async def handle_normalized_mattermost_event(
                     if thread_context is not None
                     else frozenset()
                 ),
-            ):
-                return False
-            _record_owned_answer(
-                config=config,
-                event=event,
-                answer_post_id=ledger_event.mattermost_post_id,
-                message_id=ledger_event.onyx_assistant_message_id,
+                answer_post_ids=delivered_post_ids,
             )
-            return True
+            if completed:
+                _record_owned_answers(
+                    config=config,
+                    event=event,
+                    answer_post_ids=delivered_post_ids,
+                    message_id=ledger_event.onyx_assistant_message_id,
+                )
+            return completed
 
         post_id = ledger_event.mattermost_post_id
         if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
@@ -520,6 +525,7 @@ async def handle_normalized_mattermost_event(
                 renew_owner_fence=renew_owner_fence,
                 channel_filter_result=channel_filter_result,
                 response_style=response_style,
+                channel_config=channel_config,
             )
 
         if post_id is None:
@@ -608,6 +614,24 @@ async def handle_normalized_mattermost_event(
             packets=packets,
             checkpoint_final=checkpoint_final,
             before_external_update=renew_owner_fence,
+            response_type=(
+                channel_config.channel_config.get("response_type", "citations")
+                if channel_config is not None
+                else "citations"
+            ),
+            include_source_previews=(
+                bool(
+                    channel_config.channel_config.get("include_source_previews", False)
+                )
+                if channel_config is not None
+                else False
+            ),
+            require_citations=(
+                "well_answered_postfilter"
+                in (channel_config.channel_config.get("answer_filters") or [])
+                if channel_config is not None
+                else False
+            ),
             final_props_factory=_build_final_action_props_factory(
                 config=config,
                 client=client,
@@ -655,12 +679,13 @@ async def handle_normalized_mattermost_event(
         loaded_context_post_ids=(
             thread_context.post_ids if thread_context is not None else frozenset()
         ),
+        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
     ):
         return False
-    _record_owned_answer(
+    _record_owned_answers(
         config=config,
         event=event,
-        answer_post_id=stream_result.post_id,
+        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
         message_id=stream_result.message_id,
     )
     return True
@@ -722,7 +747,9 @@ async def _deliver_ephemeral_rendered_message(
         user_id=event.user_id,
         channel_id=event.channel_id,
         root_id=_response_root_id(event),
-        message=ledger_event.rendered_message or "",
+        message=bound_mattermost_ephemeral_rendered_message(
+            ledger_event.rendered_message or ""
+        ),
         props={"onyx_event_key": str(ledger_event.id)},
     )
     if not checkpoint_mattermost_terminal_outcome(
@@ -757,6 +784,7 @@ async def _run_ephemeral_answer(
     renew_owner_fence: Callable[[], bool],
     channel_filter_result: MattermostChannelFilterResult | None,
     response_style: str | None,
+    channel_config: Any | None,
 ) -> bool:
     packets = _checkpoint_mattermost_turn_packets(
         packets=_stream_mattermost_answer_packets(
@@ -796,6 +824,22 @@ async def _run_ephemeral_answer(
         packets=packets,
         checkpoint_final=checkpoint_final,
         before_external_update=renew_owner_fence,
+        response_type=(
+            channel_config.channel_config.get("response_type", "citations")
+            if channel_config is not None
+            else "citations"
+        ),
+        include_source_previews=(
+            bool(channel_config.channel_config.get("include_source_previews", False))
+            if channel_config is not None
+            else False
+        ),
+        require_citations=(
+            "well_answered_postfilter"
+            in (channel_config.channel_config.get("answer_filters") or [])
+            if channel_config is not None
+            else False
+        ),
         before_ephemeral_delivery=lambda: checkpoint_mattermost_terminal_outcome(
             db_session,
             event_id=ledger_event.id,
@@ -823,28 +867,29 @@ async def _run_ephemeral_answer(
         loaded_context_post_ids=loaded_context_post_ids,
     ):
         return False
-    _record_owned_answer(
+    _record_owned_answers(
         config=config,
         event=event,
-        answer_post_id=stream_result.post_id,
+        answer_post_ids=(stream_result.post_id,),
         message_id=stream_result.message_id,
     )
     return True
 
 
-def _record_owned_answer(
+def _record_owned_answers(
     *,
     config: MattermostHandlerConfig,
     event: NormalizedMattermostEvent,
-    answer_post_id: str,
+    answer_post_ids: tuple[str, ...],
     message_id: int,
 ) -> None:
     if config.owned_thread_root_ids is not None:
         config.owned_thread_root_ids.add(event.root_post_id)
-    if config.owned_answer_post_root_ids is not None:
-        config.owned_answer_post_root_ids[answer_post_id] = event.root_post_id
-    if config.owned_answer_post_message_ids is not None:
-        config.owned_answer_post_message_ids[answer_post_id] = message_id
+    for answer_post_id in answer_post_ids:
+        if config.owned_answer_post_root_ids is not None:
+            config.owned_answer_post_root_ids[answer_post_id] = event.root_post_id
+        if config.owned_answer_post_message_ids is not None:
+            config.owned_answer_post_message_ids[answer_post_id] = message_id
 
 
 def _resolve_mattermost_channel_config(
@@ -1001,6 +1046,14 @@ def _build_mattermost_context(
             "be friendly and concise, lead with the answer, do not restate the "
             "question, use short paragraphs or at most five bullets, expand only "
             "on request, and preserve citations plus safety-critical detail."
+        )
+    elif response_style == "detailed":
+        base_context += (
+            "\nMattermost response style control: selected Onyx Agent Instructions "
+            "remain the only base personality source. For Mattermost delivery, "
+            "provide a detailed answer when useful, keep the structure scannable, "
+            "do not duplicate the user's question, and preserve citations plus "
+            "safety-critical detail."
         )
     if thread_context is None:
         return base_context

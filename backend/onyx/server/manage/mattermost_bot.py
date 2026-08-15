@@ -39,6 +39,9 @@ def _form_channel_config(
         "channel_name": request.channel_name,
         "respond_tag_only": request.respond_tag_only,
         "response_style": request.response_style.value,
+        "response_type": request.response_type.value,
+        "include_source_previews": request.include_source_previews,
+        "answer_filters": request.answer_filters,
         "disabled": request.disabled,
     }
 
@@ -106,6 +109,9 @@ def create_bot(
             "channel_name": None,
             "respond_tag_only": True,
             "response_style": "orka_concise",
+            "response_type": "citations",
+            "include_source_previews": False,
+            "answer_filters": [],
             "disabled": False,
         },
         is_default=True,
