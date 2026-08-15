@@ -320,6 +320,20 @@ async def handle_normalized_mattermost_event(
         if claim.claim_owner is None:
             raise RuntimeError("Mattermost ledger claim is missing its owner")
         claim_owner = claim.claim_owner
+        ledger_event = claim.event
+        if ledger_event.terminal_outcome is not None:
+            if (
+                ledger_event.terminal_outcome
+                == MattermostDeliveryTerminalOutcome.DELIVERED.value
+            ):
+                return complete_mattermost_answer_event(
+                    db_session,
+                    event_id=ledger_event.id,
+                    claim_owner=claim_owner,
+                    loaded_context_post_ids=frozenset(),
+                )
+            return False
+
         service_user = get_or_create_mattermost_service_account(db_session)
         file_descriptors = await _save_mattermost_attachments(
             client=client,
@@ -334,20 +348,6 @@ async def handle_normalized_mattermost_event(
                 event_id=claim.event.id,
                 claim_owner=claim_owner,
             )
-
-        ledger_event = claim.event
-        if ledger_event.terminal_outcome is not None:
-            if (
-                ledger_event.terminal_outcome
-                == MattermostDeliveryTerminalOutcome.DELIVERED.value
-            ):
-                return complete_mattermost_answer_event(
-                    db_session,
-                    event_id=ledger_event.id,
-                    claim_owner=claim_owner,
-                    loaded_context_post_ids=frozenset(),
-                )
-            return False
 
         try:
             channel_filter_result = await resolve_mattermost_channel_filters(

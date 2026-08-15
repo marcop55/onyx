@@ -469,6 +469,86 @@ async def test_completed_filtered_private_replay_skips_filter_resolution() -> No
 
 
 @pytest.mark.asyncio
+async def test_completed_private_replay_with_attachment_skips_all_fresh_effects() -> (
+    None
+):
+    from onyx.onyxbot.mattermost.handler import (
+        MattermostHandlerConfig,
+        handle_normalized_mattermost_event,
+    )
+    from onyx.onyxbot.mattermost.session import MattermostChatTarget
+
+    client = _RecordingClient()
+    target = MattermostChatTarget(
+        chat_session_id=UUID("00000000-0000-0000-0000-000000000001"),
+        parent_message_id=11,
+        persona_id=456,
+        mapping=MagicMock(id=7),
+    )
+    event = replace(
+        _channel_event(),
+        text="summarize in:secret",
+        file_ids=("file-1",),
+    )
+    claim = _processing_claim(
+        delivery_mode=MattermostResponseDeliveryMode.EPHEMERAL,
+        terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERED,
+        onyx_assistant_message_id=22,
+        rendered_message="already delivered",
+    )
+
+    with (
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_chat_target",
+            return_value=target,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.claim_durable_mattermost_event",
+            return_value=claim,
+        ),
+        patch(
+            "onyx.onyxbot.mattermost.handler.get_or_create_mattermost_service_account"
+        ) as service_account,
+        patch(
+            "onyx.onyxbot.mattermost.handler._save_mattermost_attachments"
+        ) as save_attachments,
+        patch(
+            "onyx.onyxbot.mattermost.handler.resolve_mattermost_channel_filters"
+        ) as resolve_filters,
+        patch(
+            "onyx.onyxbot.mattermost.handler.build_mattermost_turn_context"
+        ) as build_context,
+        patch(
+            "onyx.onyxbot.mattermost.handler.handle_stream_message_objects"
+        ) as handle_stream,
+        patch(
+            "onyx.onyxbot.mattermost.handler.complete_mattermost_answer_event",
+            return_value=True,
+        ) as complete,
+    ):
+        handled = await handle_normalized_mattermost_event(
+            event=event,
+            config=MattermostHandlerConfig(
+                persona_id=456,
+                ephemeral_response_channel_ids=frozenset({"channel-1"}),
+            ),
+            client=client,
+            db_session=MagicMock(),
+        )
+
+    assert handled is True
+    service_account.assert_not_called()
+    save_attachments.assert_not_awaited()
+    resolve_filters.assert_not_awaited()
+    build_context.assert_not_awaited()
+    handle_stream.assert_not_called()
+    assert client.created_posts == []
+    assert client.created_ephemeral_posts == []
+    assert client.updated_posts == []
+    complete.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_ephemeral_delivery_failure_is_terminal_and_never_falls_back_public() -> (
     None
 ):
