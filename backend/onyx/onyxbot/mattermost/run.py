@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse
 
 from onyx.configs.app_configs import (
@@ -18,6 +18,10 @@ from onyx.configs.app_configs import (
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import hydrate_mattermost_listener_config
 from onyx.onyxbot.mattermost.client import MattermostClient
+from onyx.onyxbot.mattermost.commands import (
+    MattermostSlashCommandResponse,
+    handle_mattermost_slash_command,
+)
 from onyx.onyxbot.mattermost.config import (
     MattermostBotConfig,
     canonical_mattermost_instance_id,
@@ -29,6 +33,7 @@ from onyx.onyxbot.mattermost.handler import (
     handle_normalized_mattermost_event,
 )
 from onyx.onyxbot.mattermost.listener import MattermostEventListener
+from onyx.onyxbot.mattermost.models import NormalizedMattermostEvent
 from onyx.onyxbot.mattermost.mutations import (
     AuthoritativePlatformGatewayBridge,
     MattermostMutationAdapter,
@@ -79,7 +84,78 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
             return JSONResponse(status_code=503, content={"status": "not_ready"})
         return JSONResponse(status_code=200, content={"status": "ok"})
 
+    @app.post("/commands/orka")
+    async def orka_command(request: Request) -> JSONResponse:
+        return await _handle_slash_command_request(request, runtime_config)
+
+    @app.post("/commands/orka/{action_name}")
+    async def orka_action_command(
+        request: Request,
+        action_name: str,
+    ) -> JSONResponse:
+        return await _handle_slash_command_request(
+            request,
+            runtime_config,
+            action_name=action_name,
+        )
+
     return app
+
+
+async def _handle_slash_command_request(
+    request: Request,
+    config: MattermostBotConfig,
+    *,
+    action_name: str | None = None,
+) -> JSONResponse:
+    form = await request.form()
+    payload = {key: str(value) for key, value in form.multi_items()}
+    if action_name in {"ask", "help", "status", "sources"}:
+        text = payload.get("text", "")
+        if not text.casefold().startswith(action_name):
+            payload["text"] = f"{action_name} {text}".strip()
+
+    instance_id = canonical_mattermost_instance_id(config.url)
+    handler_config = MattermostHandlerConfig(
+        persona_id=config.persona_id,
+        instance_id=instance_id,
+        owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
+        tombstoned_thread_root_ids=config.listener_config.tombstoned_thread_root_ids,
+        owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,
+        owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
+    )
+    async with MattermostClient(
+        config.url,
+        config.token,
+        request_timeout_seconds=config.request_timeout_seconds,
+    ) as client:
+
+        async def handle_event(event: NormalizedMattermostEvent) -> bool:
+            with get_session_with_current_tenant() as db_session:
+                return await handle_normalized_mattermost_event(
+                    event=event,
+                    config=handler_config,
+                    client=client,
+                    db_session=db_session,
+                )
+
+        response = await handle_mattermost_slash_command(
+            payload=payload,
+            expected_token=config.slash_command_token,
+            bot_user_id=config.listener_config.bot_user_id,
+            client=client,
+            handle_event=handle_event,
+        )
+    return _slash_command_json_response(response)
+
+
+def _slash_command_json_response(
+    response: MattermostSlashCommandResponse,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=response.status_code,
+        content=response.as_mattermost_payload(),
+    )
 
 
 async def _run_bot(
