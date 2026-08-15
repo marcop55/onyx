@@ -9,6 +9,7 @@ from dataclasses import replace
 
 import uvicorn
 from fastapi import FastAPI, Request
+from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
 from onyx.configs.app_configs import (
@@ -17,6 +18,7 @@ from onyx.configs.app_configs import (
 )
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import (
+    fetch_mattermost_private_answer_channel_ids,
     get_or_bootstrap_mattermost_slash_command_config,
     hydrate_mattermost_listener_config,
 )
@@ -137,15 +139,8 @@ async def _handle_slash_command_request(
         if slash_command_config is not None and slash_command_config.token is not None
         else None
     )
-    handler_config = MattermostHandlerConfig(
-        persona_id=config.persona_id,
-        instance_id=instance_id,
-        bot_user_id=config.listener_config.bot_user_id,
-        owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
-        tombstoned_thread_root_ids=config.listener_config.tombstoned_thread_root_ids,
-        owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,
-        owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
-    )
+    with get_session_with_current_tenant() as db_session:
+        handler_config = _build_handler_config(config, db_session)
     async with MattermostClient(
         config.url,
         config.token,
@@ -186,15 +181,8 @@ async def _run_bot(
     with get_session_with_current_tenant() as db_session:
         hydrate_mattermost_listener_config(db_session, config.listener_config)
 
-    handler_config = MattermostHandlerConfig(
-        persona_id=config.persona_id,
-        instance_id=canonical_mattermost_instance_id(config.url),
-        bot_user_id=config.listener_config.bot_user_id,
-        owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
-        tombstoned_thread_root_ids=(config.listener_config.tombstoned_thread_root_ids),
-        owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,
-        owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
-    )
+    with get_session_with_current_tenant() as db_session:
+        handler_config = _build_handler_config(config, db_session)
     async with MattermostClient(
         config.url,
         config.token,
@@ -220,6 +208,28 @@ async def _run_bot(
                     client=client,
                     db_session=db_session,
                 )
+
+
+def _build_handler_config(
+    config: MattermostBotConfig,
+    db_session: Session,
+) -> MattermostHandlerConfig:
+    instance_id = canonical_mattermost_instance_id(config.url)
+    ephemeral_response_channel_ids = fetch_mattermost_private_answer_channel_ids(
+        db_session,
+        instance_id=instance_id,
+        bot_user_id=config.listener_config.bot_user_id,
+    )
+    return MattermostHandlerConfig(
+        persona_id=config.persona_id,
+        instance_id=instance_id,
+        bot_user_id=config.listener_config.bot_user_id,
+        owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
+        tombstoned_thread_root_ids=config.listener_config.tombstoned_thread_root_ids,
+        owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,
+        owned_answer_post_message_ids=config.listener_config.owned_answer_post_message_ids,
+        ephemeral_response_channel_ids=ephemeral_response_channel_ids,
+    )
 
 
 def main() -> None:

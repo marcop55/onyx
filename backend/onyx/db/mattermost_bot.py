@@ -2,6 +2,7 @@ import datetime
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
@@ -20,7 +21,11 @@ from onyx.db.models import (
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
 )
-from onyx.onyxbot.mattermost.models import MattermostListenerConfig
+from onyx.onyxbot.mattermost.models import (
+    MattermostDeliveryTerminalOutcome,
+    MattermostListenerConfig,
+    MattermostResponseDeliveryMode,
+)
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
 MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
@@ -80,18 +85,37 @@ def update_mattermost_bot(
     return mattermost_bot
 
 
+def _default_mattermost_channel_config(
+    *,
+    channel_name: str | None,
+    respond_tag_only: bool = True,
+    response_style: str = "orka_concise",
+    disabled: bool = False,
+) -> ChannelConfig:
+    return {
+        "channel_name": channel_name,
+        "respond_tag_only": respond_tag_only,
+        "response_style": response_style,
+        "disabled": disabled,
+    }
+
+
 def insert_mattermost_channel_config(
     db_session: Session,
     *,
     mattermost_bot_id: int,
     channel_id: str | None,
-    channel_name: str | None,
-    persona_id: int | None,
-    channel_config: ChannelConfig,
+    channel_name: str | None = None,
+    persona_id: int | None = None,
+    channel_config: ChannelConfig | None = None,
     is_default: bool = False,
+    is_ephemeral: bool = False,
+    enabled: bool = True,
 ) -> MattermostChannelConfig:
     if not is_default and not channel_id:
         raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if is_default and channel_id is not None:
+        raise ValueError("Default Mattermost config cannot target a channel.")
     if is_default:
         existing_default = db_session.scalar(
             select(MattermostChannelConfig).where(
@@ -106,8 +130,11 @@ def insert_mattermost_channel_config(
         channel_id=channel_id,
         channel_name=channel_name,
         persona_id=persona_id,
-        channel_config=channel_config,
+        channel_config=channel_config
+        or _default_mattermost_channel_config(channel_name=channel_name),
         is_default=is_default,
+        is_ephemeral=is_ephemeral,
+        enabled=enabled,
     )
     db_session.add(config)
     db_session.commit()
@@ -116,7 +143,6 @@ def insert_mattermost_channel_config(
 
 def fetch_mattermost_channel_config(
     db_session: Session,
-    *,
     mattermost_channel_config_id: int,
 ) -> MattermostChannelConfig:
     config = db_session.scalar(
@@ -180,21 +206,33 @@ def update_mattermost_channel_config(
     db_session: Session,
     *,
     mattermost_channel_config_id: int,
+    mattermost_bot_id: int | None = None,
     channel_id: str | None,
-    channel_name: str | None,
-    persona_id: int | None,
-    channel_config: ChannelConfig,
+    channel_name: str | None = None,
+    persona_id: int | None = None,
+    channel_config: ChannelConfig | None = None,
+    is_ephemeral: bool | None = None,
+    enabled: bool | None = None,
 ) -> MattermostChannelConfig:
     config = fetch_mattermost_channel_config(
         db_session,
         mattermost_channel_config_id=mattermost_channel_config_id,
     )
+    if mattermost_bot_id is not None:
+        config.mattermost_bot_id = mattermost_bot_id
     if not config.is_default and not channel_id:
         raise ValueError("Channel ID is required for non-default Mattermost configs.")
+    if config.is_default and channel_id is not None:
+        raise ValueError("Default Mattermost config cannot target a channel.")
     config.channel_id = channel_id
     config.channel_name = channel_name
     config.persona_id = persona_id
-    config.channel_config = channel_config  # ty: ignore[invalid-assignment]
+    if channel_config is not None:
+        config.channel_config = channel_config  # ty: ignore[invalid-assignment]
+    if is_ephemeral is not None:
+        config.is_ephemeral = is_ephemeral
+    if enabled is not None:
+        config.enabled = enabled
     db_session.commit()
     return config
 
@@ -239,6 +277,45 @@ def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> Non
         return
     db_session.delete(mattermost_bot)
     db_session.commit()
+
+
+def fetch_mattermost_private_answer_channel_ids(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> frozenset[str]:
+    channel_configs = db_session.scalars(
+        select(MattermostChannelConfig)
+        .join(MattermostBot)
+        .where(
+            MattermostBot.enabled.is_(True),
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostChannelConfig.enabled.is_(True),
+            MattermostChannelConfig.is_ephemeral.is_(True),
+        )
+    ).all()
+    return frozenset(
+        channel_config.channel_id
+        for channel_config in channel_configs
+        if channel_config.channel_id is not None
+        if _canonical_mattermost_instance_id(channel_config.mattermost_bot.url)
+        == instance_id
+    )
+
+
+def _canonical_mattermost_instance_id(url: str) -> str:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if not scheme or not hostname:
+        return url.rstrip("/")
+    port = parsed.port
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
 class MattermostThreadTombstonedError(RuntimeError):
@@ -516,6 +593,40 @@ def checkpoint_mattermost_post(
     )
 
 
+def checkpoint_mattermost_delivery_mode(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    delivery_mode: MattermostResponseDeliveryMode,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"delivery_mode": delivery_mode.value},
+    )
+
+
+def checkpoint_mattermost_terminal_outcome(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    terminal_outcome: MattermostDeliveryTerminalOutcome,
+    post_id: str | None = None,
+) -> bool:
+    values: dict[str, object] = {"terminal_outcome": terminal_outcome.value}
+    if post_id is not None:
+        values["mattermost_post_id"] = post_id
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values=values,
+    )
+
+
 def checkpoint_mattermost_turn(
     db_session: Session,
     *,
@@ -590,9 +701,13 @@ def complete_mattermost_answer_event(
     if event is None:
         db_session.rollback()
         return False
+    delivered_ephemeral = (
+        event.delivery_mode == MattermostResponseDeliveryMode.EPHEMERAL.value
+        and event.terminal_outcome == MattermostDeliveryTerminalOutcome.DELIVERED.value
+    )
     if (
         event.mapping_id is None
-        or event.mattermost_post_id is None
+        or (event.mattermost_post_id is None and not delivered_ephemeral)
         or event.onyx_assistant_message_id is None
         or event.rendered_message is None
     ):
@@ -607,7 +722,10 @@ def complete_mattermost_answer_event(
 
     mapping.parent_message_id = event.onyx_assistant_message_id
     answer_post_message_ids = dict(mapping.answer_post_message_ids)
-    answer_post_message_ids[event.mattermost_post_id] = event.onyx_assistant_message_id
+    if event.mattermost_post_id is not None:
+        answer_post_message_ids[event.mattermost_post_id] = (
+            event.onyx_assistant_message_id
+        )
     mapping.answer_post_message_ids = answer_post_message_ids
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:

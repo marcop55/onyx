@@ -22,6 +22,16 @@ class MattermostNormalizedEventType(StrEnum):
     POST_DELETE_TOMBSTONE = "post_delete_tombstone"
 
 
+class MattermostResponseDeliveryMode(StrEnum):
+    PUBLIC_THREAD = "public_thread"
+    EPHEMERAL = "ephemeral"
+
+
+class MattermostDeliveryTerminalOutcome(StrEnum):
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
+
+
 @dataclass(frozen=True)
 class MattermostPost:
     """Mattermost post fields used by the adapter."""

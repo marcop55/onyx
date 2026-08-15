@@ -177,6 +177,7 @@ def create_mattermost_channel_config(
     db_session: Session = Depends(get_session),
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> MattermostChannelConfig:
+    fetch_mattermost_bot(db_session, request.mattermost_bot_id)
     config_model = insert_mattermost_channel_config(
         db_session=db_session,
         mattermost_bot_id=request.mattermost_bot_id,
@@ -185,6 +186,8 @@ def create_mattermost_channel_config(
         persona_id=request.persona_id,
         channel_config=_form_channel_config(request),
         is_default=request.is_default,
+        is_ephemeral=request.is_ephemeral,
+        enabled=request.enabled,
     )
     return MattermostChannelConfig.from_model(config_model)
 
@@ -200,6 +203,7 @@ def patch_mattermost_channel_config(
         db_session,
         mattermost_channel_config_id=mattermost_channel_config_id,
     )
+    fetch_mattermost_bot(db_session, request.mattermost_bot_id)
     if existing.mattermost_bot_id != request.mattermost_bot_id:
         raise HTTPException(status_code=400, detail="Mattermost bot ID cannot change")
     config_model = update_mattermost_channel_config(
@@ -209,6 +213,8 @@ def patch_mattermost_channel_config(
         channel_name=request.channel_name,
         persona_id=request.persona_id,
         channel_config=_form_channel_config(request),
+        is_ephemeral=request.is_ephemeral,
+        enabled=request.enabled,
     )
     return MattermostChannelConfig.from_model(config_model)
 
@@ -237,4 +243,20 @@ def list_mattermost_bot_configs(
             db_session,
             mattermost_bot_id=mattermost_bot_id,
         )
+    ]
+
+
+@router.get("/admin/mattermost-app/channel")
+def list_mattermost_channel_configs(
+    mattermost_bot_id: int | None = None,
+    db_session: Session = Depends(get_session),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> list[MattermostChannelConfig]:
+    config_models = fetch_mattermost_channel_configs(
+        db_session=db_session,
+        mattermost_bot_id=mattermost_bot_id,
+    )
+    return [
+        MattermostChannelConfig.from_model(config_model)
+        for config_model in config_models
     ]

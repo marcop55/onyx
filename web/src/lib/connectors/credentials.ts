@@ -101,6 +101,10 @@ export interface SlackCredentialJson {
   slack_bot_token: string;
 }
 
+export interface SeafileCredentialJson {
+  seafile_api_token: string;
+}
+
 export interface GmailCredentialJson {
   google_tokens: string;
   google_primary_admin: string;
@@ -319,6 +323,9 @@ export const credentialTemplates: Record<ValidSources, any> = {
     bitbucket_api_token: "",
   } as BitbucketCredentialJson,
   slack: { slack_bot_token: "" } as SlackCredentialJson,
+  seafile: {
+    seafile_api_token: "",
+  } as SeafileCredentialJson,
   bookstack: {
     bookstack_base_url: "",
     bookstack_api_token_id: "",
@@ -566,6 +573,9 @@ export const credentialDisplayNames: Record<string, string> = {
 
   // Slack
   slack_bot_token: "Slack Bot Token",
+
+  // Seafile
+  seafile_api_token: "Seafile API Token",
 
   // Discord
   discord_bot_token: "Discord Bot Token",

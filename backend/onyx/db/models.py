@@ -3459,6 +3459,8 @@ class MattermostEventState(Base):
     )
     mattermost_pending_post_id: Mapped[str] = mapped_column(String, nullable=False)
     mattermost_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    delivery_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    terminal_outcome: Mapped[str | None] = mapped_column(String, nullable=True)
     onyx_user_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
     )
@@ -3569,6 +3571,18 @@ class MattermostChannelConfig(Base):
     is_default: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    is_ephemeral: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     mattermost_bot: Mapped[MattermostBot] = relationship(
         "MattermostBot",
@@ -3588,6 +3602,11 @@ class MattermostChannelConfig(Base):
             "is_default",
             unique=True,
             postgresql_where=is_default.is_(true()),
+        ),
+        Index(
+            "ix_mattermost_channel_config_bot_enabled",
+            "mattermost_bot_id",
+            "enabled",
         ),
     )
 

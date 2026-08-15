@@ -488,6 +488,8 @@ class MattermostChannelConfigCreationRequest(BaseModel):
     response_style: MattermostResponseStyle = MattermostResponseStyle.ORKA_CONCISE
     disabled: bool = False
     is_default: bool = False
+    is_ephemeral: bool = False
+    enabled: bool = True
 
     @model_validator(mode="after")
     def validate_channel_identity(self) -> "MattermostChannelConfigCreationRequest":
@@ -498,6 +500,9 @@ class MattermostChannelConfigCreationRequest(BaseModel):
         return self
 
 
+MattermostChannelConfigRequest = MattermostChannelConfigCreationRequest
+
+
 class MattermostChannelConfig(BaseModel):
     id: int
     mattermost_bot_id: int
@@ -506,6 +511,8 @@ class MattermostChannelConfig(BaseModel):
     persona: PersonaSnapshot | None
     channel_config: ChannelConfig
     is_default: bool
+    is_ephemeral: bool
+    enabled: bool
 
     @classmethod
     def from_model(
@@ -523,6 +530,8 @@ class MattermostChannelConfig(BaseModel):
             ),
             channel_config=cast(ChannelConfig, config_model.channel_config),
             is_default=config_model.is_default,
+            is_ephemeral=config_model.is_ephemeral,
+            enabled=config_model.enabled,
         )
 
 
