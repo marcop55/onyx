@@ -5,6 +5,7 @@ from onyx.onyxbot.mattermost.parity import (
     MattermostParityStatus,
     SlackCapabilityArea,
     matrix_by_key,
+    slack_owner_contracts_by_key,
     validate_mattermost_slack_parity_matrix,
 )
 
@@ -122,6 +123,30 @@ def test_manifest_evidence_points_to_existing_owner_contracts() -> None:
     assert missing_evidence == []
 
 
+def test_each_capability_records_slack_owner_contract_dimensions() -> None:
+    required_dimensions = frozenset(
+        {
+            "source",
+            "public",
+            "storage",
+            "defaults",
+            "validation",
+            "authorization",
+            "tests",
+        }
+    )
+    contracts_by_key = slack_owner_contracts_by_key()
+
+    assert frozenset(contracts_by_key) == _EXPECTED_KEYS
+    for key, contracts in contracts_by_key.items():
+        assert {
+            contract.partition(":")[0] for contract in contracts
+        } == required_dimensions
+        assert all(
+            "backend/" in contract or "web/" in contract for contract in contracts
+        )
+
+
 def test_primary_platform_gap_records_fallback_without_weakening_retrieval() -> None:
     matrix = matrix_by_key()
     private_permissions = matrix["per_user_private_onyx_permissions"]
@@ -143,3 +168,5 @@ def test_human_matrix_lists_every_executable_manifest_key() -> None:
     for key in _EXPECTED_KEYS:
         assert f"`{key}`" in document
     assert "Generated from `backend/onyx/onyxbot/mattermost/parity.py`" in document
+    assert "slack_owner_contracts_by_key()" in document
+    assert "public API/UI, storage, defaults, validation, authorization" in document

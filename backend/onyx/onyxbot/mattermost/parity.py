@@ -355,8 +355,117 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
 )
 
 
+_SLACK_MANAGED_CONFIG_CONTRACT = (
+    "source: backend/onyx/server/manage/slack_bot.py:create_bot, patch_bot, _form_channel_config; web/src/app/admin/bots/SlackTokensForm.tsx; web/src/app/admin/bots/[bot-id]/channels/SlackChannelConfigFormFields.tsx",
+    "public: backend/onyx/server/manage/slack_bot.py exposes /api/manage/admin/slack-app/bots and /api/manage/admin/slack-app/channel through the manage router",
+    "storage: backend/onyx/db/models.py:SlackBot stores encrypted bot/app/user tokens; SlackChannelConfig stores JSONB channel_config, persona_id, standard_answer_categories, enable_auto_filters, is_default",
+    "defaults: backend/onyx/server/manage/slack_bot.py:create_bot creates a default channel config with channel_name=None, respond_tag_only=True, enable_auto_filters=False, is_default=True; backend/onyx/db/models.py:ChannelConfig defaults optional flags false",
+    "validation: backend/onyx/server/manage/slack_bot.py validates Slack tokens, channel-name uniqueness, answer_filters and document_sets/persona_id exclusivity",
+    "authorization: backend/onyx/server/manage/slack_bot.py requires Permission.FULL_ADMIN_PANEL_ACCESS for Slack bot and channel CRUD",
+    "tests: backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py pins this contract; backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py pins shipped Slack answer/filter behavior",
+)
+
+_SLACK_RUNTIME_ANSWER_CONTRACT = (
+    "source: backend/onyx/onyxbot/slack/listener.py:SlackbotHandler; backend/onyx/onyxbot/slack/handlers/handle_message.py:handle_message; backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:handle_regular_answer",
+    "public: backend/onyx/onyxbot/slack/listener.py consumes Slack Socket Mode events and slash/block-action payloads, then responds through Slack WebClient posts, updates and ephemeral posts",
+    "storage: backend/onyx/db/models.py:SlackChannelConfig stores channel JSONB and persona_id; backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py sends ChatSessionCreationRequest and SendMessageRequest into Onyx chat storage",
+    "defaults: backend/onyx/server/manage/models.py:SlackChannelConfigCreationRequest defaults respond_tag_only/respond_to_bots/is_ephemeral/show_continue_in_web_ui/enable_auto_filters/disabled false; backend/onyx/server/manage/slack_bot.py:create_bot default respond_tag_only=True",
+    "validation: backend/onyx/onyxbot/slack/config.py:validate_channel_name and backend/onyx/server/manage/models.py validators constrain managed config before runtime use",
+    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py resolves Slack email to an Onyx user for ephemeral/DM private access, otherwise anonymous user; persona access denial fails closed",
+    "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py pins Slack answer, channel-reference and persona-denial behavior; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py maps the release contract",
+)
+
+_SLACK_ACTION_FEEDBACK_CONTRACT = (
+    "source: backend/onyx/onyxbot/slack/handlers/handle_buttons.py:handle_generate_answer_button, handle_publish_ephemeral_message_button, handle_slack_feedback, handle_followup_button, handle_followup_resolved_button",
+    "public: backend/onyx/onyxbot/slack/listener.py routes Slack block actions and view submissions to button handlers using action IDs from backend/onyx/onyxbot/slack/constants.py",
+    "storage: backend/onyx/onyxbot/slack/handlers/handle_buttons.py writes chat-message feedback and doc-retrieval feedback through backend/onyx/db/feedback.py",
+    "defaults: backend/onyx/configs/onyxbot_configs.py controls feedback/follow-up emoji and visibility defaults consumed by backend/onyx/onyxbot/slack/handlers/handle_buttons.py",
+    "validation: backend/onyx/onyxbot/slack/handlers/handle_buttons.py validates payload action IDs, message IDs, doc IDs, ranks, metadata and Slack user identity before side effects",
+    "authorization: backend/onyx/onyxbot/slack/handlers/handle_buttons.py resolves the clicking Slack user to an Onyx user when feedback attribution is available and uses configured channel follow-up tags/groups",
+    "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py covers adjacent Slack answer contracts; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py requires this mapped action/feedback evidence",
+)
+
+_SLACK_SEARCH_CONNECTOR_CONTRACT = (
+    "source: backend/onyx/context/search/federated/slack_search.py; backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:resolve_channel_references",
+    "public: backend/onyx/context/search/federated/slack_search.py performs Slack federated search and thread context fetches, while Slack bot channel references become Onyx search tags",
+    "storage: backend/onyx/context/search/federated/slack_search.py builds transient federated SearchDoc results; backend/onyx/db/models.py:SlackChannelConfig stores answer_filters and enable_auto_filters",
+    "defaults: backend/onyx/configs/app_configs.py supplies Slack thread context limits; backend/onyx/server/manage/models.py defaults answer_filters to [] and enable_auto_filters to False",
+    "validation: backend/onyx/server/manage/models.py validates answer_filters against backend/onyx/onyxbot/slack/config.py:VALID_SLACK_FILTERS; resolve_channel_references ignores unresolved channel IDs",
+    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py uses persona/user access and bypass_acl=False before Slack search/filter context reaches chat",
+    "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py covers channel-reference filters; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py pins Mattermost fallback boundaries",
+)
+
+_SLACK_BOT_IDENTITY_CONTRACT = (
+    "source: backend/onyx/onyxbot/slack/listener.py:SlackbotHandler; backend/onyx/onyxbot/slack/utils.py:get_onyx_bot_auth_ids; backend/onyx/onyxbot/slack/handlers/handle_message.py:handle_message",
+    "public: backend/onyx/onyxbot/slack/listener.py ignores bot/self events and routes only eligible Slack user events into managed channel configs",
+    "storage: backend/onyx/db/models.py:SlackBot stores bot/app/user tokens and enabled state; backend/onyx/db/models.py:SlackChannelConfig stores per-channel persona and response controls",
+    "defaults: backend/onyx/server/manage/slack_bot.py:create_bot creates an enabled bot with a default respond_tag_only channel config for all channels and DMs",
+    "validation: backend/onyx/server/manage/slack_bot.py validates Slack tokens before storage and backend/onyx/onyxbot/slack/config.py validates duplicate channel names",
+    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py enforces Onyx persona access for resolved Slack users and falls back to anonymous/service users where public-channel behavior requires it",
+    "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py pins persona access denial and channel-reference behavior; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py pins Mattermost identity mapping",
+)
+
+_SLACK_OWNER_CONTRACTS_BY_KEY: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(
+        (
+            "bot_instance_configuration",
+            "channel_agent_configuration",
+            "channel_response_controls",
+        ),
+        _SLACK_MANAGED_CONFIG_CONTRACT,
+    ),
+    **dict.fromkeys(
+        (
+            "direct_message_answer",
+            "explicit_channel_mention_answer",
+            "root_allowlisted_post_answer",
+            "thread_followup_answer",
+            "slash_command_entrypoint",
+            "ephemeral_or_private_answer",
+            "interactive_retry_control",
+            "streaming_single_post_answer",
+            "citations_and_source_links",
+            "complete_thread_context",
+            "attachment_handling",
+            "health_delivery_observability",
+        ),
+        _SLACK_RUNTIME_ANSWER_CONTRACT,
+    ),
+    **dict.fromkeys(
+        (
+            "chat_feedback",
+            "standard_answer_workflow",
+            "followup_workflow",
+        ),
+        _SLACK_ACTION_FEEDBACK_CONTRACT,
+    ),
+    **dict.fromkeys(
+        (
+            "shared_full_corpus_retrieval",
+            "mattermost_history_search_connector",
+            "channel_reference_filtering",
+        ),
+        _SLACK_SEARCH_CONNECTOR_CONTRACT,
+    ),
+    **dict.fromkeys(
+        (
+            "bot_loop_prevention",
+            "membership_authorization",
+            "per_user_private_onyx_permissions",
+            "admin_seafile_mutation",
+            "non_admin_seafile_mutation",
+        ),
+        _SLACK_BOT_IDENTITY_CONTRACT,
+    ),
+}
+
+
 def matrix_by_key() -> dict[str, SlackToMattermostCapability]:
     return {entry.key: entry for entry in MATTERMOST_SLACK_PARITY_MATRIX}
+
+
+def slack_owner_contracts_by_key() -> dict[str, tuple[str, ...]]:
+    return _SLACK_OWNER_CONTRACTS_BY_KEY.copy()
 
 
 def validate_mattermost_slack_parity_matrix() -> tuple[str, ...]:
@@ -374,4 +483,9 @@ def validate_mattermost_slack_parity_matrix() -> tuple[str, ...]:
             entry.fallback or entry.guarantees
         ):
             problems.append(f"{entry.key} policy difference needs boundary")
+        if entry.key not in _SLACK_OWNER_CONTRACTS_BY_KEY:
+            problems.append(f"{entry.key} has no Slack owner contract")
+    unknown_owner_contracts = set(_SLACK_OWNER_CONTRACTS_BY_KEY) - seen_keys
+    for key in sorted(unknown_owner_contracts):
+        problems.append(f"unknown Slack owner contract key: {key}")
     return tuple(problems)

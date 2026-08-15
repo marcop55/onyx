@@ -10,6 +10,16 @@ Generated from `backend/onyx/onyxbot/mattermost/parity.py`. Keep this human-read
 - Replay, retry, and ambiguous transport outcomes must not duplicate visible answers, files, feedback, or mutations.
 - Non-admin Seafile mutation remains unreachable. Only a freshly verified Mattermost `system_admin` can route a typed mutation through the controlled platform gateway.
 
+## Slack source-of-truth evidence
+
+The executable manifest records a Slack owner contract for every key through `slack_owner_contracts_by_key()`. Each contract names exact release-line source paths for the shipped Slack code plus the public API/UI, storage, defaults, validation, authorization, and test evidence dimensions.
+
+- Managed Slack bot/channel configuration: `backend/onyx/server/manage/slack_bot.py`, `backend/onyx/server/manage/models.py`, `backend/onyx/db/models.py:SlackBot`, `backend/onyx/db/models.py:SlackChannelConfig`, `web/src/app/admin/bots/SlackTokensForm.tsx`, and `web/src/app/admin/bots/[bot-id]/channels/SlackChannelConfigFormFields.tsx`.
+- Slack runtime answers: `backend/onyx/onyxbot/slack/listener.py`, `backend/onyx/onyxbot/slack/handlers/handle_message.py`, and `backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py`.
+- Slack actions and feedback: `backend/onyx/onyxbot/slack/handlers/handle_buttons.py`, `backend/onyx/onyxbot/slack/constants.py`, and `backend/onyx/db/feedback.py`.
+- Slack federated search/channel references: `backend/onyx/context/search/federated/slack_search.py` and `backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:resolve_channel_references`.
+- Slack identity/bot-loop controls: `backend/onyx/onyxbot/slack/listener.py:SlackbotHandler`, `backend/onyx/onyxbot/slack/utils.py:get_onyx_bot_auth_ids`, and `backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py`.
+
 ## Matrix
 
 | Key | Area | Classification | Mattermost contract | Evidence / fallback |
