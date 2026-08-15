@@ -13,6 +13,7 @@ from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.models import (
     ChatSession,
     MattermostAttachment,
+    MattermostBot,
     MattermostEventState,
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
@@ -25,6 +26,86 @@ from onyx.onyxbot.mattermost.models import (
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
 MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
+
+
+def insert_mattermost_bot(
+    db_session: Session,
+    *,
+    name: str,
+    url: str,
+    enabled: bool,
+    token: str,
+    bot_user_id: str,
+    bot_username: str,
+    health_status: str = "unknown",
+    health_error: str | None = None,
+) -> MattermostBot:
+    mattermost_bot = MattermostBot(
+        name=name,
+        url=url,
+        enabled=enabled,
+        token=token,
+        bot_user_id=bot_user_id,
+        bot_username=bot_username,
+        health_status=health_status,
+        health_error=health_error,
+    )
+    db_session.add(mattermost_bot)
+    db_session.commit()
+    return mattermost_bot
+
+
+def update_mattermost_bot(
+    db_session: Session,
+    *,
+    mattermost_bot_id: int,
+    name: str,
+    url: str,
+    enabled: bool,
+    token: str | None,
+    bot_user_id: str,
+    bot_username: str,
+    health_status: str,
+    health_error: str | None,
+) -> MattermostBot:
+    mattermost_bot = fetch_mattermost_bot(db_session, mattermost_bot_id)
+    mattermost_bot.name = name
+    mattermost_bot.url = url
+    mattermost_bot.enabled = enabled
+    if token is not None:
+        mattermost_bot.token = token  # ty: ignore[invalid-assignment]
+    mattermost_bot.bot_user_id = bot_user_id
+    mattermost_bot.bot_username = bot_username
+    mattermost_bot.health_status = health_status
+    mattermost_bot.health_error = health_error
+    db_session.commit()
+    return mattermost_bot
+
+
+def fetch_mattermost_bot(
+    db_session: Session,
+    mattermost_bot_id: int,
+) -> MattermostBot:
+    mattermost_bot = db_session.scalar(
+        select(MattermostBot).where(MattermostBot.id == mattermost_bot_id)
+    )
+    if mattermost_bot is None:
+        raise ValueError(f"Unable to find Mattermost Bot with ID {mattermost_bot_id}")
+    return mattermost_bot
+
+
+def fetch_mattermost_bots(db_session: Session) -> list[MattermostBot]:
+    return list(db_session.scalars(select(MattermostBot)).all())
+
+
+def remove_mattermost_bot(db_session: Session, *, mattermost_bot_id: int) -> None:
+    mattermost_bot = db_session.scalar(
+        select(MattermostBot).where(MattermostBot.id == mattermost_bot_id)
+    )
+    if mattermost_bot is None:
+        return
+    db_session.delete(mattermost_bot)
+    db_session.commit()
 
 
 class MattermostThreadTombstonedError(RuntimeError):

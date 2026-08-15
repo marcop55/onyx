@@ -1,7 +1,7 @@
 """add Mattermost ephemeral delivery state
 
 Revision ID: f1a2b3c4d5e6
-Revises: e13a5d78b9c2
+Revises: f0a1b2c3d4e5
 Create Date: 2026-08-15
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "f1a2b3c4d5e6"
-down_revision: str | None = "e13a5d78b9c2"
+down_revision: str | None = "f0a1b2c3d4e5"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

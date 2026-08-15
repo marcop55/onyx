@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
-from io import BytesIO
 from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from onyx.chat.models import AnswerStreamPart
 from onyx.chat.process_message import handle_stream_message_objects
-from onyx.configs.constants import FileOrigin, MessageType, QAFeedbackType
+from onyx.configs.constants import MessageType, QAFeedbackType
 from onyx.db.chat import TERMINATED_RESPONSE_PLACEHOLDER, get_chat_message
-from onyx.db.enums import UserFileStatus
 from onyx.db.mattermost_bot import (
     MattermostClaimOutcome,
     MattermostThreadTombstonedError,
@@ -39,14 +35,13 @@ from onyx.db.mattermost_bot import (
 )
 from onyx.db.models import (
     ChatMessage,
-    MattermostAttachment,
     MattermostEventState,
-    UserFile,
 )
 from onyx.db.persona import get_persona_by_id
 from onyx.db.users import get_or_create_mattermost_service_account
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import FileDescriptor
+from onyx.onyxbot.mattermost.attachments import save_mattermost_attachments
 from onyx.onyxbot.mattermost.client import MattermostClientError
 from onyx.onyxbot.mattermost.context import (
     MattermostThreadContextFetchError,
@@ -83,7 +78,6 @@ from onyx.onyxbot.mattermost.streaming import (
     stream_mattermost_answer,
     stream_mattermost_ephemeral_answer,
 )
-from onyx.server.query_and_chat.chat_utils import mime_type_to_chat_file_type
 from onyx.server.query_and_chat.models import (
     MessageOrigin,
     MessageResponseIDInfo,
@@ -850,88 +844,15 @@ async def _save_mattermost_attachments(
     ledger_event: MattermostEventState,
     service_user_id: UUID,
 ) -> list[FileDescriptor]:
-    descriptors: list[FileDescriptor] = []
-    if not event.file_ids:
-        return descriptors
-    file_store = get_default_file_store()
-    for file_id in event.file_ids:
-        existing_attachment = db_session.scalar(
-            select(MattermostAttachment).where(
-                MattermostAttachment.event_id == ledger_event.id,
-                MattermostAttachment.mattermost_file_id == file_id,
-                MattermostAttachment.file_store_id.is_not(None),
-                MattermostAttachment.user_file_id.is_not(None),
-            )
-        )
-        if existing_attachment is not None:
-            descriptors.append(
-                {
-                    "id": existing_attachment.file_store_id or "",
-                    "type": mime_type_to_chat_file_type(existing_attachment.mime_type),
-                    "name": existing_attachment.filename,
-                    "user_file_id": str(existing_attachment.user_file_id),
-                }
-            )
-            continue
-        info = await client.get_file_info(file_id)
-        if info.id != file_id or info.post_id != event.post_id:
-            raise MattermostClientError(
-                f"Mattermost file {file_id} does not belong to source post {event.post_id}"
-            )
-        content = await client.download_file(file_id)
-        checksum = hashlib.sha256(content).hexdigest()
-        stable_file_store_id = (
-            f"mattermost/{ledger_event.instance_id}/{event.channel_id}/{file_id}"
-        )
-        stored_file_id = file_store.save_file(
-            content=BytesIO(content),
-            display_name=info.filename,
-            file_origin=FileOrigin.USER_FILE,
-            file_type=info.mime_type or "application/octet-stream",
-            file_id=stable_file_store_id,
-        )
-        stable_user_file_id = uuid5(NAMESPACE_URL, stable_file_store_id)
-        user_file = db_session.scalar(
-            select(UserFile).where(UserFile.id == stable_user_file_id)
-        )
-        if user_file is None:
-            user_file = UserFile(
-                id=stable_user_file_id,
-                user_id=service_user_id,
-                file_id=stored_file_id,
-                name=info.filename,
-                token_count=0,
-                file_type=info.mime_type or "application/octet-stream",
-                status=UserFileStatus.COMPLETED,
-                content_type=info.mime_type or "application/octet-stream",
-            )
-            db_session.add(user_file)
-            db_session.commit()
-        record_mattermost_attachment(
-            db_session,
-            event_id=ledger_event.id,
-            mattermost_file_id=info.id,
-            source_post_id=info.post_id or event.post_id,
-            uploader_user_id=info.uploader_user_id,
-            filename=info.filename,
-            mime_type=info.mime_type or "application/octet-stream",
-            size_bytes=info.size_bytes,
-            sha256=checksum,
-            channel_id=event.channel_id,
-            root_post_id=event.root_post_id,
-            create_at=info.create_at,
-            file_store_id=stored_file_id,
-            user_file_id=user_file.id,
-        )
-        descriptors.append(
-            {
-                "id": stored_file_id,
-                "type": mime_type_to_chat_file_type(info.mime_type),
-                "name": info.filename,
-                "user_file_id": str(user_file.id),
-            }
-        )
-    return descriptors
+    return await save_mattermost_attachments(
+        client=client,
+        db_session=db_session,
+        event=event,
+        ledger_event=ledger_event,
+        service_user_id=service_user_id,
+        get_file_store=get_default_file_store,
+        record_attachment=record_mattermost_attachment,
+    )
 
 
 def _build_mattermost_context(
