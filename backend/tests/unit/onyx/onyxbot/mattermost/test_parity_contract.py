@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from onyx.onyxbot.mattermost.parity import (
@@ -11,6 +12,11 @@ from onyx.onyxbot.mattermost.parity import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[6]
 _DOC_PATH = _REPO_ROOT / "docs" / "mattermost-slack-parity.md"
+
+_SOURCE_PATH_RE = re.compile(
+    r"(?P<path>(?:backend|docs|web)/[A-Za-z0-9_./\[\]-]+)"
+    r"(?::(?P<anchor>[A-Za-z_][A-Za-z0-9_]*))?"
+)
 
 _EXPECTED_KEYS = frozenset(
     {
@@ -136,6 +142,7 @@ def test_each_capability_records_slack_owner_contract_dimensions() -> None:
         }
     )
     contracts_by_key = slack_owner_contracts_by_key()
+    source_problems: list[str] = []
 
     assert frozenset(contracts_by_key) == _EXPECTED_KEYS
     for key, contracts in contracts_by_key.items():
@@ -145,6 +152,28 @@ def test_each_capability_records_slack_owner_contract_dimensions() -> None:
         assert all(
             "backend/" in contract or "web/" in contract for contract in contracts
         )
+        for contract in contracts:
+            assert "..." not in contract
+            dimension, _, _ = contract.partition(":")
+            source_refs = list(_SOURCE_PATH_RE.finditer(contract))
+            if not source_refs:
+                source_problems.append(f"{key}:{dimension}: missing source path")
+                continue
+            for source_ref in source_refs:
+                source_path = source_ref.group("path")
+                source_file = _REPO_ROOT / source_path
+                if not source_file.is_file():
+                    source_problems.append(
+                        f"{key}:{dimension}: missing file {source_path}"
+                    )
+                    continue
+                anchor = source_ref.group("anchor")
+                if anchor and anchor not in source_file.read_text(encoding="utf-8"):
+                    source_problems.append(
+                        f"{key}:{dimension}: missing anchor {source_path}:{anchor}"
+                    )
+
+    assert source_problems == []
 
 
 def test_primary_platform_gap_records_fallback_without_weakening_retrieval() -> None:

@@ -361,7 +361,7 @@ _SLACK_MANAGED_CONFIG_CONTRACT = (
     "storage: backend/onyx/db/models.py:SlackBot stores encrypted bot/app/user tokens; SlackChannelConfig stores JSONB channel_config, persona_id, standard_answer_categories, enable_auto_filters, is_default",
     "defaults: backend/onyx/server/manage/slack_bot.py:create_bot creates a default channel config with channel_name=None, respond_tag_only=True, enable_auto_filters=False, is_default=True; backend/onyx/db/models.py:ChannelConfig defaults optional flags false",
     "validation: backend/onyx/server/manage/slack_bot.py validates Slack tokens, channel-name uniqueness, answer_filters and document_sets/persona_id exclusivity",
-    "authorization: backend/onyx/server/manage/slack_bot.py requires Permission.FULL_ADMIN_PANEL_ACCESS for Slack bot and channel CRUD",
+    "authorization: backend/onyx/server/manage/slack_bot.py:create_slack_channel_config, patch_slack_channel_config, delete_slack_channel_config, list_slack_channel_configs, create_bot, patch_bot require onyx.auth.permissions.require_permission with backend/onyx/db/enums.py:Permission.FULL_ADMIN_PANEL_ACCESS for Slack bot and channel CRUD",
     "tests: backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py pins this contract; backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py pins shipped Slack answer/filter behavior",
 )
 
@@ -371,7 +371,7 @@ _SLACK_RUNTIME_ANSWER_CONTRACT = (
     "storage: backend/onyx/db/models.py:SlackChannelConfig stores channel JSONB and persona_id; backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py sends ChatSessionCreationRequest and SendMessageRequest into Onyx chat storage",
     "defaults: backend/onyx/server/manage/models.py:SlackChannelConfigCreationRequest defaults respond_tag_only/respond_to_bots/is_ephemeral/show_continue_in_web_ui/enable_auto_filters/disabled false; backend/onyx/server/manage/slack_bot.py:create_bot default respond_tag_only=True",
     "validation: backend/onyx/onyxbot/slack/config.py:validate_channel_name and backend/onyx/server/manage/models.py validators constrain managed config before runtime use",
-    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py resolves Slack email to an Onyx user for ephemeral/DM private access, otherwise anonymous user; persona access denial fails closed",
+    "authorization: backend/onyx/onyxbot/slack/listener.py:build_request_details resolves Slack sender email through onyx.connectors.slack.utils:expert_info_from_slack_id; backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:handle_regular_answer maps that email with onyx.db.users:get_user_by_email, falls back through onyx.auth.users:get_anonymous_user, checks persona access with onyx.db.persona:get_persona_by_id, and calls handle_stream_message_objects with bypass_acl=False",
     "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py pins Slack answer, channel-reference and persona-denial behavior; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py maps the release contract",
 )
 
@@ -381,7 +381,7 @@ _SLACK_ACTION_FEEDBACK_CONTRACT = (
     "storage: backend/onyx/onyxbot/slack/handlers/handle_buttons.py writes chat-message feedback and doc-retrieval feedback through backend/onyx/db/feedback.py",
     "defaults: backend/onyx/configs/onyxbot_configs.py controls feedback/follow-up emoji and visibility defaults consumed by backend/onyx/onyxbot/slack/handlers/handle_buttons.py",
     "validation: backend/onyx/onyxbot/slack/handlers/handle_buttons.py validates payload action IDs, message IDs, doc IDs, ranks, metadata and Slack user identity before side effects",
-    "authorization: backend/onyx/onyxbot/slack/handlers/handle_buttons.py resolves the clicking Slack user to an Onyx user when feedback attribution is available and uses configured channel follow-up tags/groups",
+    "authorization: backend/onyx/onyxbot/slack/listener.py:process_feedback routes Slack feedback actions; backend/onyx/onyxbot/slack/handlers/handle_buttons.py:handle_slack_feedback resolves the clicking Slack user through onyx.connectors.slack.utils:expert_info_from_slack_id and onyx.db.users:get_user_by_email before feedback attribution; backend/onyx/onyxbot/slack/handlers/handle_buttons.py:handle_followup_button loads configured follow_up_tags/groups through get_slack_channel_config_for_bot_and_channel",
     "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py covers adjacent Slack answer contracts; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py requires this mapped action/feedback evidence",
 )
 
@@ -391,7 +391,7 @@ _SLACK_SEARCH_CONNECTOR_CONTRACT = (
     "storage: backend/onyx/context/search/federated/slack_search.py builds transient federated SearchDoc results; backend/onyx/db/models.py:SlackChannelConfig stores answer_filters and enable_auto_filters",
     "defaults: backend/onyx/configs/app_configs.py supplies Slack thread context limits; backend/onyx/server/manage/models.py defaults answer_filters to [] and enable_auto_filters to False",
     "validation: backend/onyx/server/manage/models.py validates answer_filters against backend/onyx/onyxbot/slack/config.py:VALID_SLACK_FILTERS; resolve_channel_references ignores unresolved channel IDs",
-    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py uses persona/user access and bypass_acl=False before Slack search/filter context reaches chat",
+    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:handle_regular_answer checks persona/user access with onyx.db.persona:get_persona_by_id, builds BaseFilters from Slack channel tags, and calls handle_stream_message_objects with bypass_acl=False before Slack search/filter context reaches chat; backend/onyx/context/search/federated/slack_search.py:slack_retrieval runs only from the provided SlackContext and OAuth access_token",
     "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py covers channel-reference filters; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py pins Mattermost fallback boundaries",
 )
 
@@ -401,7 +401,7 @@ _SLACK_BOT_IDENTITY_CONTRACT = (
     "storage: backend/onyx/db/models.py:SlackBot stores bot/app/user tokens and enabled state; backend/onyx/db/models.py:SlackChannelConfig stores per-channel persona and response controls",
     "defaults: backend/onyx/server/manage/slack_bot.py:create_bot creates an enabled bot with a default respond_tag_only channel config for all channels and DMs",
     "validation: backend/onyx/server/manage/slack_bot.py validates Slack tokens before storage and backend/onyx/onyxbot/slack/config.py validates duplicate channel names",
-    "authorization: backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py enforces Onyx persona access for resolved Slack users and falls back to anonymous/service users where public-channel behavior requires it",
+    "authorization: backend/onyx/onyxbot/slack/listener.py:prefilter_requests ignores bot/self events using backend/onyx/onyxbot/slack/utils.py:get_onyx_bot_auth_ids; backend/onyx/onyxbot/slack/listener.py:build_request_details resolves Slack user email; backend/onyx/onyxbot/slack/handlers/handle_regular_answer.py:handle_regular_answer enforces Onyx persona access for resolved Slack users and falls back to anonymous/service users where public-channel behavior requires it",
     "tests: backend/tests/unit/onyx/onyxbot/test_handle_regular_answer.py pins persona access denial and channel-reference behavior; backend/tests/unit/onyx/onyxbot/mattermost/test_parity_contract.py pins Mattermost identity mapping",
 )
 
