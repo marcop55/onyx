@@ -19,6 +19,7 @@ from onyx.db.models import (
 from onyx.onyxbot.mattermost.models import MattermostListenerConfig
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
+MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
 
 
 class MattermostThreadTombstonedError(RuntimeError):
@@ -290,6 +291,7 @@ def complete_mattermost_answer_event(
     *,
     event_id: int,
     claim_owner: UUID,
+    loaded_context_post_ids: frozenset[str] = frozenset(),
 ) -> bool:
     event = db_session.scalar(
         select(MattermostEventState)
@@ -326,7 +328,11 @@ def complete_mattermost_answer_event(
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:
         processed_event_ids.append(event.dedupe_key)
-        mapping.processed_event_ids = processed_event_ids[-10_000:]
+    for post_id in sorted(loaded_context_post_ids):
+        context_event_id = f"{MATTERMOST_CONTEXT_POST_ID_PREFIX}{post_id}"
+        if context_event_id not in processed_event_ids:
+            processed_event_ids.append(context_event_id)
+    mapping.processed_event_ids = processed_event_ids[-10_000:]
     event.state = "completed"
     event.claim_owner = None
     event.lease_expires_at = None
@@ -447,6 +453,33 @@ def get_mattermost_thread_mapping_by_chat_session_id(
             MattermostThreadMapping.chat_session_id == chat_session_id
         )
     )
+
+
+def get_loaded_mattermost_context_post_ids(
+    db_session: Session,
+    mapping_id: int,
+) -> frozenset[str]:
+    """Return source posts already represented in an Onyx turn for this mapping."""
+
+    handled_turn_post_ids = {
+        post_id
+        for post_id in db_session.scalars(
+            select(MattermostEventState.source_post_id).where(
+                MattermostEventState.mapping_id == mapping_id,
+                MattermostEventState.onyx_user_message_id.is_not(None),
+            )
+        ).all()
+        if post_id
+    }
+    mapping = db_session.get(MattermostThreadMapping, mapping_id)
+    if mapping is None:
+        return frozenset(handled_turn_post_ids)
+    loaded_context_post_ids = {
+        event_id.removeprefix(MATTERMOST_CONTEXT_POST_ID_PREFIX)
+        for event_id in mapping.processed_event_ids
+        if event_id.startswith(MATTERMOST_CONTEXT_POST_ID_PREFIX)
+    }
+    return frozenset(handled_turn_post_ids | loaded_context_post_ids)
 
 
 def get_or_create_mattermost_thread_mapping(

@@ -743,6 +743,10 @@ class _RecordingClient:
     async def get_user_info(self, user_id: str) -> MattermostUserInfo:
         raise AssertionError(f"unexpected user-info request: {user_id}")
 
+    async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]:
+        _ = root_post_id
+        return []
+
     async def download_file(self, file_id: str) -> bytes:
         raise AssertionError(f"unexpected file download: {file_id}")
 

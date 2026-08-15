@@ -139,6 +139,65 @@ async def test_find_post_by_idempotency_fields_matches_stored_post() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_thread_posts_fetches_thread_and_preserves_latest_post_state() -> (
+    None
+):
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload={
+                    "order": ["root-1", "reply-1", "deleted-1"],
+                    "posts": {
+                        "root-1": {
+                            "id": "root-1",
+                            "channel_id": "channel-1",
+                            "message": "root text",
+                            "user_id": "user-1",
+                            "create_at": 100,
+                        },
+                        "reply-1": {
+                            "id": "reply-1",
+                            "channel_id": "channel-1",
+                            "root_id": "root-1",
+                            "message": "edited reply",
+                            "user_id": "user-2",
+                            "create_at": 200,
+                            "update_at": 250,
+                        },
+                        "deleted-1": {
+                            "id": "deleted-1",
+                            "channel_id": "channel-1",
+                            "root_id": "root-1",
+                            "message": "deleted reply",
+                            "user_id": "user-3",
+                            "create_at": 300,
+                            "delete_at": 350,
+                        },
+                    },
+                },
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    posts = await client.get_thread_posts("root-1")
+
+    assert [post.id for post in posts] == ["root-1", "reply-1", "deleted-1"]
+    assert posts[1].message == "edited reply"
+    assert posts[1].update_at == 250
+    assert posts[2].delete_at == 350
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/posts/root-1/thread",
+    )
+
+
+@pytest.mark.asyncio
 async def test_is_channel_member_checks_current_membership() -> None:
     session = _FakeSession(
         [

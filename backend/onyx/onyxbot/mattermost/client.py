@@ -148,6 +148,38 @@ class MattermostClient:
                 return post
         return None
 
+    async def get_thread_posts(self, root_post_id: str) -> list[MattermostPost]:
+        """Return the latest Mattermost post state for one thread."""
+
+        response = await self._request_json(
+            "GET",
+            f"/api/v4/posts/{root_post_id}/thread",
+        )
+        raw_posts = response.get("posts")
+        if not isinstance(raw_posts, dict):
+            raise MattermostClientError("Mattermost thread posts payload is invalid")
+        posts_by_id: dict[str, MattermostPost] = {}
+        for raw_post_id, raw_post in raw_posts.items():
+            if not isinstance(raw_post_id, str) or not isinstance(raw_post, Mapping):
+                continue
+            posts_by_id[raw_post_id] = _post_from_mapping(
+                cast(Mapping[object, object], raw_post)
+            )
+        raw_order = response.get("order")
+        if isinstance(raw_order, list):
+            ordered_posts = [
+                posts_by_id[post_id]
+                for post_id in raw_order
+                if isinstance(post_id, str) and post_id in posts_by_id
+            ]
+            ordered_posts.extend(
+                post
+                for post_id, post in posts_by_id.items()
+                if post_id not in raw_order
+            )
+            return ordered_posts
+        return list(posts_by_id.values())
+
     async def update_post(self, *, post_id: str, message: str) -> MattermostPost:
         """Update a Mattermost post message."""
         response = await self._request_json(
