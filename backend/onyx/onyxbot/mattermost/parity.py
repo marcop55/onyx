@@ -269,11 +269,21 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="mattermost_history_search_connector",
         area=SlackCapabilityArea.SEARCH,
         slack_capability="Slack federated/history search connector.",
-        mattermost_contract="Mattermost history indexing is intentionally not faked in issue #30.",
-        status=MattermostParityStatus.PLATFORM_GAP,
-        evidence=("docs/mattermost-adapter.md:Issue #8 verification tiers",),
-        guarantees=frozenset({"no_fake_connectors", "shared_full_corpus"}),
-        fallback="Use existing Onyx retrieval until issue #36 ships an authentic Mattermost connector.",
+        mattermost_contract="Mattermost history indexing uses a first-class Onyx connector with stable post/thread IDs, bot-and-sender membership checks, tombstone text for deletions, hierarchy nodes, canonical post links and file metadata.",
+        status=MattermostParityStatus.DIRECT_MATTERMOST_FEATURE,
+        evidence=(
+            "backend/onyx/connectors/mattermost/connector.py:MattermostConnector",
+            "backend/onyx/connectors/mattermost/models.py:MattermostPost",
+            "backend/tests/unit/onyx/connectors/mattermost/test_mattermost_connector.py",
+        ),
+        guarantees=frozenset(
+            {
+                "no_fake_connectors",
+                "membership_fail_closed",
+                "shared_full_corpus",
+                "replay_safe",
+            }
+        ),
     ),
     SlackToMattermostCapability(
         key="channel_reference_filtering",
