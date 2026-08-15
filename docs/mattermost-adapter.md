@@ -59,10 +59,12 @@ Onyx exposes no direct Seafile mutation transport.
 
 Production mutation commands use the explicit wire prefix
 `!onyx-seafile-mutate ` followed by one JSON object containing exactly
-`action`, `repo_id`, `path`, `origin`, `expected_revision`, `content`,
-`destination_path`, `confirmed`, and `scope_prefix`. Types are validated exactly
-before any identity lookup. In particular, booleans are not accepted as
-revisions or strings, and unknown or missing fields fail closed.
+`action`, `repo_id`, `path`, `expected_revision`, `content`, `destination_path`,
+`confirmed`, and `scope_prefix`. The adapter derives the origin as `chat_command`
+and derives requester and post/thread correlation from the normalized server
+event. Supplying origin, requester, channel, post, root, or any other unknown
+field fails closed before any identity lookup. Types are validated exactly; in
+particular, booleans are not accepted as revisions or strings.
 
 The Mattermost service enables mutation routing only when
 `MATTERMOST_MUTATION_GATEWAY_FACTORY` names an installed factory as

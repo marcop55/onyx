@@ -15,6 +15,7 @@ from onyx.onyxbot.mattermost.mutations import (
     MATTERMOST_MUTATION_COMMAND_PREFIX,
     MattermostMutationAdapter,
     MattermostMutationContext,
+    SeafileActionOrigin,
     SeafileActionRequest,
 )
 
@@ -77,7 +78,6 @@ def command(**overrides: object) -> str:
         "action": "update",
         "repo_id": "repo-1",
         "path": "/automation/note.md",
-        "origin": "chat_command",
         "expected_revision": "rev-1",
         "content": "new content",
         "destination_path": None,
@@ -105,6 +105,13 @@ async def test_authorized_command_routes_once_and_posts_controlled_success() -> 
     assert handled is True
     assert client.identity_calls == ["mm-user-1"]
     assert len(gateway.calls) == 1
+    context, request = gateway.calls[0]
+    assert context.requester_id == mutation_event.user_id
+    assert context.channel_id == mutation_event.channel_id
+    assert context.post_id == mutation_event.post_id
+    assert context.root_post_id == mutation_event.root_post_id
+    assert request.origin is SeafileActionOrigin.CHAT_COMMAND
+    assert request.requesting_user == "reiss"
     assert [post["message"] for post in client.posts] == [
         "Seafile mutation completed through the controlled platform gateway."
     ]
@@ -175,7 +182,7 @@ async def test_duplicate_wire_fields_are_rejected_before_lookup_or_gateway() -> 
     duplicate = (
         MATTERMOST_MUTATION_COMMAND_PREFIX
         + '{"action":"update","action":"delete","repo_id":"repo-1",'
-        '"path":"/automation/note.md","origin":"chat_command",'
+        '"path":"/automation/note.md",'
         '"expected_revision":"rev-1","content":null,"destination_path":null,'
         '"confirmed":true,"scope_prefix":"/automation"}'
     )
@@ -193,13 +200,63 @@ async def test_duplicate_wire_fields_are_rejected_before_lookup_or_gateway() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "spoofed_origin",
+    ["chat_command", "tool_call", "document_text", "attachment_promotion"],
+)
+async def test_untrusted_origin_is_rejected_before_lookup_or_gateway(
+    spoofed_origin: str,
+) -> None:
+    client = DispatchClient([identity("system_admin")])
+    gateway = ControlledGateway()
+
+    handled = await dispatch_mattermost_mutation(
+        event=replace(event(), text=command(origin=spoofed_origin)),
+        client=cast(Any, client),
+        adapter=MattermostMutationAdapter(client, gateway),
+    )
+
+    assert handled is True
+    assert client.identity_calls == []
+    assert gateway.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requester_id", "spoofed-user"),
+        ("requesting_user", "spoofed-user"),
+        ("channel_id", "spoofed-channel"),
+        ("post_id", "spoofed-post"),
+        ("root_post_id", "spoofed-root"),
+    ],
+)
+async def test_untrusted_event_provenance_is_rejected_before_lookup_or_gateway(
+    field: str,
+    value: str,
+) -> None:
+    client = DispatchClient([identity("system_admin")])
+    gateway = ControlledGateway()
+
+    handled = await dispatch_mattermost_mutation(
+        event=replace(event(), text=command(**{field: value})),
+        client=cast(Any, client),
+        adapter=MattermostMutationAdapter(client, gateway),
+    )
+
+    assert handled is True
+    assert client.identity_calls == []
+    assert gateway.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "overrides",
     [
         {"expected_revision": True},
         {"confirmed": 1},
         {"repo_id": ["repo-1"]},
         {"path": None},
-        {"origin": "document_text"},
         {"unexpected": "field"},
     ],
 )
