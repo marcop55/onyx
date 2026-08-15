@@ -484,6 +484,7 @@ async def test_attachment_storage_identity_is_stable_across_replay() -> None:
             post_id="post-1",
             filename="same-name.txt",
             mime_type="text/plain",
+            size_bytes=6,
         )
     )
     client.download_file = AsyncMock(return_value=b"stable")

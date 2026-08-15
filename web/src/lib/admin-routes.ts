@@ -92,6 +92,12 @@ export const ADMIN_ROUTES = {
     title: "Slack Integration",
     sidebarLabel: "Slack Integration",
   },
+  MATTERMOST_BOTS: {
+    path: "/admin/mattermost-bots",
+    icon: SvgBubbleText,
+    title: "Mattermost Integration",
+    sidebarLabel: "Mattermost Integration",
+  },
   DISCORD_BOTS: {
     path: "/admin/discord-bot",
     icon: SvgDiscord,

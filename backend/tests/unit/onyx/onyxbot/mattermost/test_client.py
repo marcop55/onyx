@@ -300,6 +300,32 @@ async def test_get_file_info_preserves_authoritative_metadata() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size_value", [None, "1234"])
+async def test_get_file_info_maps_missing_or_invalid_size_to_none(
+    size_value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "id": "file-1",
+        "user_id": "uploader-1",
+        "post_id": "post-1",
+        "name": "brief.pdf",
+        "mime_type": "application/pdf",
+    }
+    if size_value is not None:
+        payload["size"] = size_value
+    session = _FakeSession([_FakeResponse(200, payload=payload)])
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    info = await client.get_file_info("file-1")
+
+    assert info.size_bytes is None
+
+
+@pytest.mark.asyncio
 async def test_get_user_info_preserves_sender_attribution() -> None:
     session = _FakeSession(
         [
