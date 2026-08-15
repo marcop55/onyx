@@ -696,6 +696,7 @@ def complete_mattermost_answer_event(
     event_id: int,
     claim_owner: UUID,
     loaded_context_post_ids: frozenset[str] = frozenset(),
+    answer_post_ids: tuple[str, ...] | None = None,
 ) -> bool:
     event = db_session.scalar(
         select(MattermostEventState)
@@ -731,10 +732,11 @@ def complete_mattermost_answer_event(
 
     mapping.parent_message_id = event.onyx_assistant_message_id
     answer_post_message_ids = dict(mapping.answer_post_message_ids)
-    if event.mattermost_post_id is not None:
-        answer_post_message_ids[event.mattermost_post_id] = (
-            event.onyx_assistant_message_id
-        )
+    post_ids = answer_post_ids or (
+        (event.mattermost_post_id,) if event.mattermost_post_id is not None else ()
+    )
+    for post_id in post_ids:
+        answer_post_message_ids[post_id] = event.onyx_assistant_message_id
     mapping.answer_post_message_ids = answer_post_message_ids
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:

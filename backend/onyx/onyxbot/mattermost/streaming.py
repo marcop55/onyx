@@ -8,7 +8,12 @@ from typing import Protocol
 
 from onyx.chat.models import AnswerStreamPart, ChatBasicResponse, StreamingError
 from onyx.context.search.models import SearchDoc
-from onyx.onyxbot.mattermost.formatting import format_mattermost_answer
+from onyx.onyxbot.mattermost.formatting import (
+    MATTERMOST_DEFAULT_MAX_PART_CHARS,
+    MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR,
+    format_mattermost_answer,
+    format_mattermost_answer_parts,
+)
 from onyx.onyxbot.mattermost.models import (
     MattermostFileInfo,
     MattermostPost,
@@ -82,6 +87,7 @@ class MattermostStreamingClient(Protocol):
 class MattermostStreamResult:
     message_id: int
     post_id: str
+    post_ids: tuple[str, ...] = ()
 
 
 async def stream_mattermost_answer(
@@ -98,6 +104,7 @@ async def stream_mattermost_answer(
     include_source_previews: bool = False,
     require_citations: bool = False,
     no_results_message: str | None = None,
+    max_part_chars: int = MATTERMOST_DEFAULT_MAX_PART_CHARS,
 ) -> MattermostStreamResult:
     """Create or resume one Mattermost post and update it from Onyx packets."""
 
@@ -138,7 +145,10 @@ async def stream_mattermost_answer(
                     top_documents = packet.obj.final_documents
             elif isinstance(packet.obj, AgentResponseDelta):
                 answer += packet.obj.content
-                if len(answer) - last_sent_answer_length >= min_update_chars:
+                if (
+                    not require_citations
+                    and len(answer) - last_sent_answer_length >= min_update_chars
+                ):
                     _require_owner_fence(before_external_update)
                     await _update_once(
                         client=client,
@@ -172,11 +182,11 @@ async def stream_mattermost_answer(
         raise MattermostStreamVisibleError("Message ID is required")
 
     if no_results_message and not top_documents and not citations:
-        final_message = no_results_message
+        final_messages = [no_results_message]
     elif require_citations and not citations:
-        final_message = MATTERMOST_NO_CITATIONS_MESSAGE
+        final_messages = [MATTERMOST_NO_CITATIONS_MESSAGE]
     else:
-        final_message = format_mattermost_answer(
+        final_messages = format_mattermost_answer_parts(
             ChatBasicResponse(
                 answer=answer,
                 answer_citationless=answer,
@@ -187,19 +197,24 @@ async def stream_mattermost_answer(
             ),
             response_type=response_type,
             include_source_previews=include_source_previews,
+            max_part_chars=max_part_chars,
         )
+    final_message = _serialize_rendered_messages(final_messages)
     if checkpoint_final is not None:
         checkpoint_final(final_message, message_id)
-    _require_owner_fence(before_external_update)
-    await _update_once(
+    post_ids = await deliver_mattermost_rendered_messages(
         client=client,
+        channel_id=channel_id,
+        root_id=root_id,
         post_id=post_id,
-        message=final_message,
+        rendered_message=final_message,
         sent_messages=sent_messages,
+        before_external_update=before_external_update,
     )
     return MattermostStreamResult(
         message_id=message_id,
         post_id=post_id,
+        post_ids=post_ids if len(post_ids) > 1 else (),
     )
 
 
@@ -310,6 +325,44 @@ async def stream_mattermost_ephemeral_answer(
     return MattermostStreamResult(message_id=message_id, post_id=post.id)
 
 
+async def deliver_mattermost_rendered_messages(
+    *,
+    client: MattermostStreamingClient,
+    channel_id: str,
+    root_id: str,
+    post_id: str,
+    rendered_message: str,
+    sent_messages: set[str] | None = None,
+    before_external_update: Callable[[], bool] | None = None,
+) -> tuple[str, ...]:
+    messages = _deserialize_rendered_messages(rendered_message)
+    if not messages:
+        messages = [""]
+    sent_message_set = sent_messages if sent_messages is not None else set()
+
+    _require_owner_fence(before_external_update)
+    await _update_once(
+        client=client,
+        post_id=post_id,
+        message=messages[0],
+        sent_messages=sent_message_set,
+    )
+    delivered_post_ids = [post_id]
+    for part_index, message in enumerate(messages[1:], start=2):
+        _require_owner_fence(before_external_update)
+        idempotency_key = _part_idempotency_key(post_id, part_index)
+        post = await _find_or_create_part_post(
+            client=client,
+            channel_id=channel_id,
+            root_id=root_id,
+            pending_post_id=idempotency_key,
+            event_key=idempotency_key,
+            message=message,
+        )
+        delivered_post_ids.append(post.id)
+    return tuple(delivered_post_ids)
+
+
 async def _deliver_ephemeral_once(
     *,
     client: MattermostStreamingClient,
@@ -335,6 +388,47 @@ async def _deliver_ephemeral_once(
     if after_ephemeral_delivery is not None and not after_ephemeral_delivery(post.id):
         raise MattermostLeaseLostError("Mattermost event lease was lost")
     return post
+
+
+async def _find_or_create_part_post(
+    *,
+    client: MattermostStreamingClient,
+    channel_id: str,
+    root_id: str,
+    pending_post_id: str,
+    event_key: str,
+    message: str,
+) -> MattermostPost:
+    existing_post = await client.find_post_by_idempotency_fields(
+        channel_id=channel_id,
+        pending_post_id=pending_post_id,
+        event_key=event_key,
+    )
+    if existing_post is not None:
+        if existing_post.message != message:
+            return await client.update_post(post_id=existing_post.id, message=message)
+        return existing_post
+    return await client.create_post(
+        channel_id=channel_id,
+        root_id=root_id,
+        message=message,
+        pending_post_id=pending_post_id,
+        props={"onyx_event_key": event_key},
+    )
+
+
+def _serialize_rendered_messages(messages: list[str]) -> str:
+    return MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR.join(messages)
+
+
+def _deserialize_rendered_messages(rendered_message: str) -> list[str]:
+    return rendered_message.split(
+        MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR
+    )
+
+
+def _part_idempotency_key(primary_post_id: str, part_index: int) -> str:
+    return f"{primary_post_id}:part:{part_index}"
 
 
 def _require_owner_fence(before_external_update: Callable[[], bool] | None) -> None:

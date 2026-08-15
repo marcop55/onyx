@@ -39,9 +39,28 @@ def format_mattermost_answer(
 ) -> str:
     """Render an Onyx answer as Mattermost-safe Markdown."""
 
+    return MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR.join(
+        format_mattermost_answer_parts(
+            answer,
+            response_type=response_type,
+            include_source_previews=include_source_previews,
+            max_part_chars=max_part_chars,
+        )
+    )
+
+
+def format_mattermost_answer_parts(
+    answer: ChatBasicResponse,
+    *,
+    response_type: str = _MATTERMOST_RESPONSE_TYPE_CITATIONS,
+    include_source_previews: bool = False,
+    max_part_chars: int = MATTERMOST_DEFAULT_MAX_PART_CHARS,
+) -> list[str]:
+    """Render an Onyx answer as Mattermost-safe Markdown posts."""
+
     rendered_answer = normalize_mattermost_markdown(answer.answer)
     if not answer.citation_info or not answer.top_documents:
-        return rendered_answer
+        return [rendered_answer]
 
     cited_documents = _cited_documents(answer.citation_info, answer.top_documents)
     citation_lines: list[str] = []
@@ -62,15 +81,13 @@ def format_mattermost_answer(
         )
 
     if not citation_lines:
-        return rendered_answer
+        return [rendered_answer]
 
     sources = "Sources:\n" + "\n".join(citation_lines)
-    return MATTERMOST_RESPONSE_PRESENTATION_SOURCE_ONCE_SEPARATOR.join(
-        _split_answer_with_sources_once(
-            answer=rendered_answer,
-            sources=sources,
-            max_part_chars=max_part_chars,
-        )
+    return _split_answer_with_sources_once(
+        answer=rendered_answer,
+        sources=sources,
+        max_part_chars=max_part_chars,
     )
 
 

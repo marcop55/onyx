@@ -264,6 +264,142 @@ async def test_stream_answer_filter_replaces_uncited_answer_with_no_citations_me
 
 
 @pytest.mark.asyncio
+async def test_stream_answer_filter_suppresses_unsourced_partial_updates() -> None:
+    client = _RecordingClient()
+    unsourced_answer = "uncited answer " * 8
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content=unsourced_answer)),
+        ]
+    )
+
+    await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=20,
+        require_citations=True,
+    )
+
+    assert client.updated_posts == [
+        {"post_id": "bot-post-1", "message": MATTERMOST_NO_CITATIONS_MESSAGE}
+    ]
+    assert unsourced_answer.strip() not in {
+        update["message"] for update in client.updated_posts
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_over_limit_answer_emits_sequential_posts_with_sources_once() -> (
+    None
+):
+    client = _RecordingClient()
+    answer = "first cited paragraph [1].\n\n" + ("second paragraph " * 12)
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc()])),
+            _packet(AgentResponseDelta(content=answer)),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=packets,
+        min_update_chars=10_000,
+        max_part_chars=90,
+    )
+
+    assert result.message_id == 22
+    assert result.post_id == "checkpointed-post"
+    assert result.post_ids == (
+        "checkpointed-post",
+        "bot-post-1",
+        "bot-post-2",
+        "bot-post-3",
+    )
+    delivered_messages = [update["message"] for update in client.updated_posts] + [
+        str(post["message"]) for post in client.created_posts
+    ]
+    assert all(len(message) <= 90 for message in delivered_messages)
+    assert "".join(delivered_messages).count("Sources:") == 1
+    assert client.updated_posts == [
+        {"post_id": "checkpointed-post", "message": "first cited paragraph [1]."}
+    ]
+    assert client.created_posts == [
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": "second paragraph second paragraph second paragraph second paragraph second paragraph",
+            "pending_post_id": "checkpointed-post:part:2",
+            "props": {"onyx_event_key": "checkpointed-post:part:2"},
+        },
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": "second paragraph second paragraph second paragraph second paragraph second paragraph",
+            "pending_post_id": "checkpointed-post:part:3",
+            "props": {"onyx_event_key": "checkpointed-post:part:3"},
+        },
+        {
+            "channel_id": "channel-1",
+            "root_id": "root-post-1",
+            "message": "second paragraph second paragraph\n\nSources:\n[1] Mattermost Doc - https://example.test/doc",
+            "pending_post_id": "checkpointed-post:part:4",
+            "props": {"onyx_event_key": "checkpointed-post:part:4"},
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_over_limit_replay_reuses_existing_split_post() -> None:
+    client = _RecordingClient()
+    client.reconciled_post = MattermostPost(
+        id="existing-part-2",
+        message="Sources:\n[1] Mattermost Doc - https://example.test/doc",
+        root_id="root-post-1",
+        user_id="bot-user-1",
+        channel_id="channel-1",
+        pending_post_id="checkpointed-post:part:2",
+        props={"onyx_event_key": "checkpointed-post:part:2"},
+    )
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseStart(final_documents=[_search_doc()])),
+            _packet(AgentResponseDelta(content="short cited [1].")),
+            _packet(CitationInfo(citation_number=1, document_id="doc-1")),
+        ]
+    )
+
+    result = await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        post_id="checkpointed-post",
+        packets=packets,
+        min_update_chars=10_000,
+        max_part_chars=70,
+    )
+
+    assert result.post_ids == ("checkpointed-post", "existing-part-2")
+    assert client.created_posts == []
+    assert client.reconciliation_requests == [
+        {
+            "channel_id": "channel-1",
+            "pending_post_id": "checkpointed-post:part:2",
+            "event_key": "checkpointed-post:part:2",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_stops_before_partial_update_when_owner_fence_is_lost() -> None:
     client = _RecordingClient()
     checks = iter([True, True, False])
@@ -464,9 +600,7 @@ async def test_handle_normalized_event_streams_and_records_parent_message(
         mock_handle_stream.call_args.kwargs["external_idempotency_key"]
         == "mattermost:event:1"
     )
-    assert client.created_posts == [
-        {"channel_id": "channel-1", "root_id": "root-post-1", "message": "..."}
-    ]
+    assert client.created_posts == [_checkpointed_placeholder_post()]
     assert client.updated_posts == [{"post_id": "bot-post-1", "message": "Onyx answer"}]
     mock_complete.assert_called_once()
 
@@ -558,9 +692,7 @@ async def test_handle_normalized_event_does_not_duplicate_visible_stream_failure
         )
 
     assert handled is True
-    assert client.created_posts == [
-        {"channel_id": "channel-1", "root_id": "root-post-1", "message": "..."}
-    ]
+    assert client.created_posts == [_checkpointed_placeholder_post()]
     assert client.updated_posts == [
         {
             "post_id": "bot-post-1",
@@ -742,7 +874,7 @@ async def test_ambiguous_post_replay_never_issues_second_post_after_search_miss(
 
 class _RecordingClient:
     def __init__(self) -> None:
-        self.created_posts: list[dict[str, str]] = []
+        self.created_posts: list[dict[str, object]] = []
         self.updated_posts: list[dict[str, str]] = []
         self.reconciliation_requests: list[dict[str, str]] = []
         self.create_error: MattermostClientError | None = None
@@ -759,18 +891,27 @@ class _RecordingClient:
         pending_post_id: str | None = None,
         props: dict[str, object] | None = None,
     ) -> MattermostPost:
-        _ = pending_post_id, props
-        self.created_posts.append(
-            {"channel_id": channel_id, "root_id": root_id, "message": message}
-        )
+        created_post: dict[str, object] = {
+            "channel_id": channel_id,
+            "root_id": root_id,
+            "message": message,
+        }
+        if pending_post_id is not None:
+            created_post["pending_post_id"] = pending_post_id
+        if props is not None:
+            created_post["props"] = props
+        self.created_posts.append(created_post)
         if self.create_error is not None:
             raise self.create_error
+        post_id = f"bot-post-{len(self.created_posts)}"
         return MattermostPost(
-            id="bot-post-1",
+            id=post_id,
             message=message,
             root_id=root_id,
             user_id="bot-user-1",
             channel_id=channel_id,
+            pending_post_id=pending_post_id or "",
+            props=props or {},
         )
 
     async def create_ephemeral_post(
@@ -853,6 +994,16 @@ def _processing_claim(
     return MattermostEventClaim(
         MattermostClaimOutcome.PROCESS, ledger_event, claim_owner
     )
+
+
+def _checkpointed_placeholder_post() -> dict[str, object]:
+    return {
+        "channel_id": "channel-1",
+        "root_id": "root-post-1",
+        "message": "...",
+        "pending_post_id": "pending-1",
+        "props": {"onyx_event_key": "1"},
+    }
 
 
 def _packet(obj: PacketObj) -> Packet:

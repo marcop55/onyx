@@ -85,6 +85,7 @@ from onyx.onyxbot.mattermost.streaming import (
     MattermostLeaseLostError,
     MattermostStreamingClient,
     MattermostStreamVisibleError,
+    deliver_mattermost_rendered_messages,
     stream_mattermost_answer,
     stream_mattermost_ephemeral_answer,
 )
@@ -452,13 +453,15 @@ async def handle_normalized_mattermost_event(
                 )
             if ledger_event.mattermost_post_id is None:
                 return False
-            if not renew_owner_fence():
-                return False
-            await client.update_post(
+            delivered_post_ids = await deliver_mattermost_rendered_messages(
+                client=client,
+                channel_id=event.channel_id,
+                root_id=_response_root_id(event),
                 post_id=ledger_event.mattermost_post_id,
-                message=ledger_event.rendered_message,
+                rendered_message=ledger_event.rendered_message,
+                before_external_update=renew_owner_fence,
             )
-            return complete_mattermost_answer_event(
+            completed = complete_mattermost_answer_event(
                 db_session,
                 event_id=ledger_event.id,
                 claim_owner=claim_owner,
@@ -467,7 +470,16 @@ async def handle_normalized_mattermost_event(
                     if thread_context is not None
                     else frozenset()
                 ),
+                answer_post_ids=delivered_post_ids,
             )
+            if completed:
+                _record_owned_answers(
+                    config=config,
+                    event=event,
+                    answer_post_ids=delivered_post_ids,
+                    message_id=ledger_event.onyx_assistant_message_id,
+                )
+            return completed
 
         post_id = ledger_event.mattermost_post_id
         if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
@@ -639,12 +651,13 @@ async def handle_normalized_mattermost_event(
         loaded_context_post_ids=(
             thread_context.post_ids if thread_context is not None else frozenset()
         ),
+        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
     ):
         return False
-    _record_owned_answer(
+    _record_owned_answers(
         config=config,
         event=event,
-        answer_post_id=stream_result.post_id,
+        answer_post_ids=stream_result.post_ids or (stream_result.post_id,),
         message_id=stream_result.message_id,
     )
     return True
@@ -824,28 +837,29 @@ async def _run_ephemeral_answer(
         loaded_context_post_ids=loaded_context_post_ids,
     ):
         return False
-    _record_owned_answer(
+    _record_owned_answers(
         config=config,
         event=event,
-        answer_post_id=stream_result.post_id,
+        answer_post_ids=(stream_result.post_id,),
         message_id=stream_result.message_id,
     )
     return True
 
 
-def _record_owned_answer(
+def _record_owned_answers(
     *,
     config: MattermostHandlerConfig,
     event: NormalizedMattermostEvent,
-    answer_post_id: str,
+    answer_post_ids: tuple[str, ...],
     message_id: int,
 ) -> None:
     if config.owned_thread_root_ids is not None:
         config.owned_thread_root_ids.add(event.root_post_id)
-    if config.owned_answer_post_root_ids is not None:
-        config.owned_answer_post_root_ids[answer_post_id] = event.root_post_id
-    if config.owned_answer_post_message_ids is not None:
-        config.owned_answer_post_message_ids[answer_post_id] = message_id
+    for answer_post_id in answer_post_ids:
+        if config.owned_answer_post_root_ids is not None:
+            config.owned_answer_post_root_ids[answer_post_id] = event.root_post_id
+        if config.owned_answer_post_message_ids is not None:
+            config.owned_answer_post_message_ids[answer_post_id] = message_id
 
 
 def _resolve_mattermost_channel_config(
