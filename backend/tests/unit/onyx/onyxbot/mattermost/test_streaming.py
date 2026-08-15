@@ -745,6 +745,24 @@ class _RecordingClient:
             channel_id=channel_id,
         )
 
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        _ = props
+        return MattermostPost(
+            id="ephemeral-post-1",
+            message=message,
+            root_id=root_id,
+            user_id=user_id,
+            channel_id=channel_id,
+        )
+
     async def find_post_by_idempotency_fields(
         self,
         *,
