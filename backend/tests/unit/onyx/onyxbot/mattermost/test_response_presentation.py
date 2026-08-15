@@ -114,6 +114,22 @@ def test_source_only_chunks_are_bounded_with_oversized_source_entry() -> None:
     assert "oversized-source-name" in "".join(parts[1:])
 
 
+def test_unsourced_answer_chunks_are_bounded_without_source_lines() -> None:
+    max_part_chars = 72
+    parts = format_mattermost_answer_parts(
+        _answer(
+            answer="unsourced paragraph " * 12,
+            citations=[],
+            top_documents=[],
+        ),
+        max_part_chars=max_part_chars,
+    )
+
+    assert len(parts) > 1
+    assert all(len(part) <= max_part_chars for part in parts)
+    assert "Sources:" not in "".join(parts)
+
+
 def test_primary_failure_mode_preserves_agent_prompt_ownership_for_style_controls() -> (
     None
 ):

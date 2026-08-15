@@ -160,12 +160,28 @@ async def stream_mattermost_answer(
                     not require_citations
                     and len(answer) - last_sent_answer_length >= min_update_chars
                 ):
-                    _require_owner_fence(before_external_update)
-                    await _update_once(
+                    await deliver_mattermost_rendered_messages(
                         client=client,
+                        channel_id=channel_id,
+                        root_id=root_id,
                         post_id=post_id,
-                        message=answer,
+                        rendered_message=_serialize_rendered_messages(
+                            [answer]
+                            if len(answer) <= max_part_chars
+                            else format_mattermost_answer_parts(
+                                ChatBasicResponse(
+                                    answer=answer,
+                                    answer_citationless=answer,
+                                    top_documents=[],
+                                    error_msg=None,
+                                    message_id=message_id or 0,
+                                    citation_info=[],
+                                ),
+                                max_part_chars=max_part_chars,
+                            )
+                        ),
                         sent_messages=sent_messages,
+                        before_external_update=before_external_update,
                     )
                     last_sent_answer_length = len(answer)
             elif isinstance(packet.obj, CitationInfo):

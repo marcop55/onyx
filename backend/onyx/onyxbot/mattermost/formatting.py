@@ -60,7 +60,7 @@ def format_mattermost_answer_parts(
 
     rendered_answer = normalize_mattermost_markdown(answer.answer)
     if not answer.citation_info or not answer.top_documents:
-        return [rendered_answer]
+        return _split_text(rendered_answer, max_part_chars)
 
     cited_documents = _cited_documents(answer.citation_info, answer.top_documents)
     citation_lines: list[str] = []
@@ -81,7 +81,7 @@ def format_mattermost_answer_parts(
         )
 
     if not citation_lines:
-        return [rendered_answer]
+        return _split_text(rendered_answer, max_part_chars)
 
     sources = "Sources:\n" + "\n".join(citation_lines)
     return _split_answer_with_sources_once(

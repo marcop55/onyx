@@ -541,6 +541,37 @@ async def test_stream_mattermost_answer_rate_bounds_partial_updates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_mattermost_answer_bounds_over_limit_partial_updates() -> None:
+    client = _RecordingClient()
+    max_part_chars = 72
+    oversized_delta = "partial answer " * 12
+    packets = iter(
+        [
+            MessageResponseIDInfo(user_message_id=10, reserved_assistant_message_id=22),
+            _packet(AgentResponseDelta(content=oversized_delta)),
+        ]
+    )
+
+    await stream_mattermost_answer(
+        client=client,
+        channel_id="channel-1",
+        root_id="root-post-1",
+        packets=packets,
+        min_update_chars=1,
+        max_part_chars=max_part_chars,
+    )
+
+    assert client.updated_posts
+    assert all(
+        len(str(update["message"])) <= max_part_chars for update in client.updated_posts
+    )
+    assert all(
+        len(str(post["message"])) <= max_part_chars for post in client.created_posts
+    )
+    assert any("pending_post_id" in post for post in client.created_posts)
+
+
+@pytest.mark.asyncio
 async def test_stream_mattermost_answer_failure_updates_existing_post_once() -> None:
     client = _RecordingClient()
     packets = iter(
