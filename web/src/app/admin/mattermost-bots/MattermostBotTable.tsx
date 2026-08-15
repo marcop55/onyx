@@ -65,6 +65,13 @@ export function MattermostBotTable({
                   Edit
                 </Button>
                 <Button
+                  href={`/admin/mattermost-bots/${mattermostBot.id}/health`}
+                  size="sm"
+                  variant="action"
+                >
+                  Health
+                </Button>
+                <Button
                   onClick={() => onDelete?.(mattermostBot)}
                   size="sm"
                   variant="danger"

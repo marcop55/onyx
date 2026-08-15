@@ -49,7 +49,7 @@ The executable manifest records a Slack owner contract for every key through `sl
 | `attachment_handling` | search | direct_mattermost_feature | Mattermost file metadata is ownership/type/size-validated before download; accepted bytes are checksummed and recorded with stable user-file IDs once for event attachments. | `backend/onyx/onyxbot/mattermost/attachments.py:save_mattermost_attachments` |
 | `admin_seafile_mutation` | administration | mattermost_native_equivalent | Only a freshly resolved Mattermost system_admin can route a typed Seafile mutation through the controlled platform gateway. | `backend/onyx/onyxbot/mattermost/mutations.py:MattermostMutationAdapter` |
 | `non_admin_seafile_mutation` | administration | policy_difference | Ordinary Mattermost members can read and summarize but cannot create, overwrite, move, delete, or promote Seafile content. | fallback: Return a clear permission denial before gateway execution. |
-| `health_delivery_observability` | administration | platform_gap | Release-line Mattermost records durable event states and bounded retries, but dashboard observability is not shipped yet. | fallback: Inspect durable event rows/logs until issue #42 ships operator health views. |
+| `health_delivery_observability` | administration | direct_mattermost_feature | Mattermost admin dashboard observability exposes connection health, joined-channel discovery, durable delivery/replay/rate-limit state, attachment failures, and connector indexing freshness without exposing tokens, message bodies, or file contents. |  |
 
 ## Verification
 
