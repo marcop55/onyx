@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from typing import Any
@@ -17,9 +17,11 @@ from onyx.db.chat import TERMINATED_RESPONSE_PLACEHOLDER, get_chat_message
 from onyx.db.mattermost_bot import (
     MattermostClaimOutcome,
     MattermostThreadTombstonedError,
+    checkpoint_mattermost_delivery_mode,
     checkpoint_mattermost_post,
     checkpoint_mattermost_post_attempt,
     checkpoint_mattermost_rendered_message,
+    checkpoint_mattermost_terminal_outcome,
     checkpoint_mattermost_turn,
     claim_durable_mattermost_event,
     complete_mattermost_answer_event,
@@ -49,8 +51,10 @@ from onyx.onyxbot.mattermost.formatting import (
     format_mattermost_answer as _format_mattermost_answer,
 )
 from onyx.onyxbot.mattermost.models import (
+    MattermostDeliveryTerminalOutcome,
     MattermostNormalizedEventType,
     MattermostPost,
+    MattermostResponseDeliveryMode,
     NormalizedMattermostEvent,
 )
 from onyx.onyxbot.mattermost.mutations import (
@@ -72,6 +76,7 @@ from onyx.onyxbot.mattermost.streaming import (
     MattermostStreamingClient,
     MattermostStreamVisibleError,
     stream_mattermost_answer,
+    stream_mattermost_ephemeral_answer,
 )
 from onyx.server.query_and_chat.models import (
     MessageOrigin,
@@ -103,6 +108,7 @@ class MattermostHandlerConfig:
     owned_answer_post_message_ids: dict[str, int] | None = None
     instance_id: str = "mattermost"
     mutation_adapter: MattermostMutationAdapter | None = None
+    ephemeral_response_channel_ids: frozenset[str] = frozenset()
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -334,6 +340,36 @@ async def handle_normalized_mattermost_event(
         )
 
         ledger_event = claim.event
+        delivery_mode = _resolve_delivery_mode(event=event, config=config)
+        if ledger_event.delivery_mode is None:
+            if not checkpoint_mattermost_delivery_mode(
+                db_session,
+                event_id=ledger_event.id,
+                claim_owner=claim_owner,
+                delivery_mode=delivery_mode,
+            ):
+                return False
+            ledger_event.delivery_mode = delivery_mode.value
+        else:
+            delivery_mode = MattermostResponseDeliveryMode(ledger_event.delivery_mode)
+
+        if ledger_event.terminal_outcome is not None:
+            if (
+                ledger_event.terminal_outcome
+                == MattermostDeliveryTerminalOutcome.DELIVERED.value
+            ):
+                return complete_mattermost_answer_event(
+                    db_session,
+                    event_id=ledger_event.id,
+                    claim_owner=claim_owner,
+                    loaded_context_post_ids=(
+                        thread_context.post_ids
+                        if thread_context is not None
+                        else frozenset()
+                    ),
+                )
+            return False
+
         if (
             ledger_event.onyx_assistant_message_id is not None
             and ledger_event.rendered_message is None
@@ -357,9 +393,24 @@ async def handle_normalized_mattermost_event(
 
         if (
             ledger_event.rendered_message is not None
-            and ledger_event.mattermost_post_id is not None
             and ledger_event.onyx_assistant_message_id is not None
         ):
+            if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
+                return await _deliver_ephemeral_rendered_message(
+                    client=client,
+                    db_session=db_session,
+                    event=event,
+                    ledger_event=ledger_event,
+                    claim_owner=claim_owner,
+                    loaded_context_post_ids=(
+                        thread_context.post_ids
+                        if thread_context is not None
+                        else frozenset()
+                    ),
+                    renew_owner_fence=renew_owner_fence,
+                )
+            if ledger_event.mattermost_post_id is None:
+                return False
             if not renew_owner_fence():
                 return False
             await client.update_post(
@@ -378,6 +429,28 @@ async def handle_normalized_mattermost_event(
             )
 
         post_id = ledger_event.mattermost_post_id
+        if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
+            return await _run_ephemeral_answer(
+                client=client,
+                db_session=db_session,
+                event=event,
+                target=target,
+                config=config,
+                service_user=service_user,
+                file_descriptors=file_descriptors,
+                ledger_event=ledger_event,
+                claim_owner=claim_owner,
+                thread_context_text=thread_context.text
+                if thread_context is not None
+                else None,
+                loaded_context_post_ids=(
+                    thread_context.post_ids
+                    if thread_context is not None
+                    else frozenset()
+                ),
+                renew_owner_fence=renew_owner_fence,
+            )
+
         if post_id is None:
             if not renew_owner_fence():
                 return False
@@ -470,6 +543,7 @@ async def handle_normalized_mattermost_event(
             client=client,
             event=event,
             message=MATTERMOST_PERSONA_ACCESS_DENIED_MESSAGE,
+            delivery_mode=_resolve_delivery_mode(event=event, config=config),
         )
         return True
     except MattermostStreamVisibleError:
@@ -486,7 +560,10 @@ async def handle_normalized_mattermost_event(
         return False
     except Exception:
         await _post_failure(
-            client=client, event=event, message=MATTERMOST_FAILURE_MESSAGE
+            client=client,
+            event=event,
+            message=MATTERMOST_FAILURE_MESSAGE,
+            delivery_mode=_resolve_delivery_mode(event=event, config=config),
         )
         return True
 
@@ -527,6 +604,142 @@ async def _find_reconciled_post(
         raise MattermostPostReconciliationError(
             "Mattermost post reconciliation outcome is ambiguous"
         ) from exc
+
+
+def _resolve_delivery_mode(
+    *,
+    event: NormalizedMattermostEvent,
+    config: MattermostHandlerConfig,
+) -> MattermostResponseDeliveryMode:
+    if event.event_type == MattermostNormalizedEventType.SLASH_COMMAND:
+        return MattermostResponseDeliveryMode.EPHEMERAL
+    if event.channel_id in config.ephemeral_response_channel_ids:
+        return MattermostResponseDeliveryMode.EPHEMERAL
+    return MattermostResponseDeliveryMode.PUBLIC_THREAD
+
+
+async def _deliver_ephemeral_rendered_message(
+    *,
+    client: MattermostStreamingClient,
+    db_session: Session,
+    event: NormalizedMattermostEvent,
+    ledger_event: MattermostEventState,
+    claim_owner: UUID,
+    loaded_context_post_ids: frozenset[str],
+    renew_owner_fence: Callable[[], bool],
+) -> bool:
+    if not renew_owner_fence():
+        return False
+    if not checkpoint_mattermost_terminal_outcome(
+        db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+        terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERY_FAILED,
+    ):
+        return False
+    post = await client.create_ephemeral_post(
+        user_id=event.user_id,
+        channel_id=event.channel_id,
+        root_id=_response_root_id(event),
+        message=ledger_event.rendered_message or "",
+        props={"onyx_event_key": str(ledger_event.id)},
+    )
+    if not checkpoint_mattermost_terminal_outcome(
+        db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+        terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERED,
+        post_id=post.id,
+    ):
+        return False
+    return complete_mattermost_answer_event(
+        db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+        loaded_context_post_ids=loaded_context_post_ids,
+    )
+
+
+async def _run_ephemeral_answer(
+    *,
+    client: MattermostStreamingClient,
+    db_session: Session,
+    event: NormalizedMattermostEvent,
+    target: MattermostChatTarget,
+    config: MattermostHandlerConfig,
+    service_user: Any,
+    file_descriptors: list[FileDescriptor],
+    ledger_event: MattermostEventState,
+    claim_owner: UUID,
+    thread_context_text: str | None,
+    loaded_context_post_ids: frozenset[str],
+    renew_owner_fence: Callable[[], bool],
+) -> bool:
+    packets = _checkpoint_mattermost_turn_packets(
+        packets=_stream_mattermost_answer_packets(
+            db_session=db_session,
+            event=event,
+            target=target,
+            config=config,
+            service_user=service_user,
+            file_descriptors=file_descriptors,
+            external_idempotency_key=f"mattermost:event:{ledger_event.id}",
+            thread_context=thread_context_text,
+        ),
+        db_session=db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+    )
+
+    def checkpoint_final(rendered_message: str, _message_id: int) -> None:
+        if not checkpoint_mattermost_rendered_message(
+            db_session,
+            event_id=ledger_event.id,
+            claim_owner=claim_owner,
+            rendered_message=rendered_message,
+        ):
+            raise MattermostLeaseLostError(
+                "Mattermost event lease was lost while checkpointing answer"
+            )
+        ledger_event.rendered_message = rendered_message
+
+    stream_result = await stream_mattermost_ephemeral_answer(
+        client=client,
+        user_id=event.user_id,
+        channel_id=event.channel_id,
+        root_id=_response_root_id(event),
+        packets=packets,
+        checkpoint_final=checkpoint_final,
+        before_external_update=renew_owner_fence,
+        before_ephemeral_delivery=lambda: checkpoint_mattermost_terminal_outcome(
+            db_session,
+            event_id=ledger_event.id,
+            claim_owner=claim_owner,
+            terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERY_FAILED,
+        ),
+        after_ephemeral_delivery=lambda post_id: checkpoint_mattermost_terminal_outcome(
+            db_session,
+            event_id=ledger_event.id,
+            claim_owner=claim_owner,
+            terminal_outcome=MattermostDeliveryTerminalOutcome.DELIVERED,
+            post_id=post_id,
+        ),
+        props={"onyx_event_key": str(ledger_event.id)},
+    )
+    if not complete_mattermost_answer_event(
+        db_session,
+        event_id=ledger_event.id,
+        claim_owner=claim_owner,
+        loaded_context_post_ids=loaded_context_post_ids,
+    ):
+        return False
+    _record_owned_answer(
+        config=config,
+        event=event,
+        answer_post_id=stream_result.post_id,
+        message_id=stream_result.message_id,
+    )
+    return True
 
 
 def _record_owned_answer(
@@ -673,8 +886,17 @@ async def _post_failure(
     client: MattermostStreamingClient,
     event: NormalizedMattermostEvent,
     message: str,
+    delivery_mode: MattermostResponseDeliveryMode = MattermostResponseDeliveryMode.PUBLIC_THREAD,
 ) -> None:
     try:
+        if delivery_mode is MattermostResponseDeliveryMode.EPHEMERAL:
+            await client.create_ephemeral_post(
+                user_id=event.user_id,
+                channel_id=event.channel_id,
+                root_id=_response_root_id(event),
+                message=message,
+            )
+            return
         await client.create_post(
             channel_id=event.channel_id,
             root_id=_response_root_id(event),
