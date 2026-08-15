@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from onyx.chat.models import ChatBasicResponse
 
 
@@ -11,6 +13,7 @@ def format_mattermost_answer(answer: ChatBasicResponse) -> str:
     if not answer.citation_info or not answer.top_documents:
         return answer.answer
 
+    rendered_answer = answer.answer
     citation_lines: list[str] = []
     for citation in sorted(answer.citation_info, key=lambda item: item.citation_number):
         document = next(
@@ -21,17 +24,19 @@ def format_mattermost_answer(answer: ChatBasicResponse) -> str:
             ),
             None,
         )
-        if document is None:
+        if document is None or not document.link:
+            rendered_answer = re.sub(
+                rf"\s*\[\[{citation.citation_number}\]\]\(\)",
+                "",
+                rendered_answer,
+            )
             continue
 
         source_name = document.semantic_identifier or document.document_id
-        if document.link:
-            citation_lines.append(
-                f"[{citation.citation_number}] {source_name} - {document.link}"
-            )
-        else:
-            citation_lines.append(f"[{citation.citation_number}] {source_name}")
+        citation_lines.append(
+            f"[{citation.citation_number}] {source_name} - {document.link}"
+        )
 
     if not citation_lines:
-        return answer.answer
-    return answer.answer + "\n\nSources:\n" + "\n".join(citation_lines)
+        return rendered_answer
+    return rendered_answer + "\n\nSources:\n" + "\n".join(citation_lines)

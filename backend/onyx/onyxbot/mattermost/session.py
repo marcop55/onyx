@@ -9,10 +9,7 @@ from sqlalchemy.orm import Session
 
 from onyx.db.mattermost_bot import get_or_create_mattermost_thread_mapping
 from onyx.db.models import MattermostThreadMapping
-from onyx.onyxbot.mattermost.models import (
-    MattermostNormalizedEventType,
-    NormalizedMattermostEvent,
-)
+from onyx.onyxbot.mattermost.models import NormalizedMattermostEvent
 
 
 @dataclass(frozen=True)
@@ -28,8 +25,6 @@ class MattermostChatTarget:
 def get_mattermost_mapping_root_id(event: NormalizedMattermostEvent) -> str:
     """Return the DB mapping root for a normalized Mattermost event."""
 
-    if event.event_type == MattermostNormalizedEventType.DIRECT_MESSAGE:
-        return event.channel_id
     return event.root_post_id
 
 

@@ -36,9 +36,9 @@ def test_format_mattermost_answer_preserves_citation_identity_and_links() -> Non
     )
 
 
-def test_format_mattermost_answer_keeps_unlinked_source_visible() -> None:
+def test_format_mattermost_answer_omits_unlinked_source_and_marker() -> None:
     answer = _answer(
-        answer="Use internal notes [3].",
+        answer="Use internal notes [[3]]().",
         citation_info=[CitationInfo(citation_number=3, document_id="internal-doc")],
         top_documents=[
             _search_doc(
@@ -51,7 +51,7 @@ def test_format_mattermost_answer_keeps_unlinked_source_visible() -> None:
 
     formatted = format_mattermost_answer(answer)
 
-    assert formatted == "Use internal notes [3].\n\nSources:\n[3] Internal Notes"
+    assert formatted == "Use internal notes."
 
 
 def _answer(
