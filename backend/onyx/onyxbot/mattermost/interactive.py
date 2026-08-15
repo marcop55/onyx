@@ -99,6 +99,7 @@ class MattermostInteractiveClient(Protocol):
 
 FeedbackCompleter = Callable[..., bool]
 MutationDispatcher = Callable[..., bool | object]
+PromotionDispatcher = Callable[..., bool | object]
 ControlClaimer = Callable[..., tuple[int, Any] | None]
 ControlCompleter = Callable[..., bool]
 PromotionClaimer = Callable[..., object | None]
@@ -187,7 +188,7 @@ def build_mattermost_answer_action_props(
             sources=sources,
         ),
     ]
-    if mutation_command is not None:
+    if mutation_command is not None or mutation_proposal_identity is not None:
         actions.append(
             _button(
                 "Confirm admin action",
@@ -244,6 +245,7 @@ async def handle_mattermost_interactive_action(
     instance_id: str = "mattermost",
     complete_feedback: FeedbackCompleter | None = None,
     dispatch_mutation: MutationDispatcher | None = None,
+    dispatch_promotion: PromotionDispatcher | None = None,
     claim_mutation: ControlClaimer | None = None,
     complete_mutation: ControlCompleter | None = None,
     claim_promotion: PromotionClaimer | None = None,
@@ -277,8 +279,20 @@ async def handle_mattermost_interactive_action(
                 message=MATTERMOST_INTERACTIVE_UNAUTHORIZED_MESSAGE,
             )
             return MattermostInteractiveActionResult.UNAUTHORIZED
-        if control.mutation_command is None or dispatch_mutation is None:
+        if (
+            control.mutation_command is None
+            and control.mutation_proposal_identity is None
+        ):
             return MattermostInteractiveActionResult.REJECTED
+        if control.mutation_proposal_identity is None and dispatch_mutation is None:
+            return MattermostInteractiveActionResult.REJECTED
+        if (
+            control.mutation_proposal_identity is not None
+            and dispatch_promotion is None
+            and dispatch_mutation is None
+        ):
+            return MattermostInteractiveActionResult.REJECTED
+        proposal = None
         if control.mutation_proposal_identity is not None:
             if claim_promotion is None:
                 if not isinstance(db_session, Session):
@@ -331,13 +345,21 @@ async def handle_mattermost_interactive_action(
             post_id=control.answer_post_id,
             root_post_id=control.root_post_id,
             user_id=control.user_id,
-            text=control.mutation_command,
+            text=control.mutation_command or "",
             raw_event_type="interactive_action",
             dedupe_key=control.dedupe_key,
             source_username=authorized_user.username,
             source_display_name=authorized_user.display_name,
         )
-        handled_result = dispatch_mutation(event=event)
+        if (
+            control.mutation_proposal_identity is not None
+            and dispatch_promotion is not None
+        ):
+            assert dispatch_promotion is not None
+            handled_result = dispatch_promotion(event=event, proposal=proposal)
+        else:
+            assert dispatch_mutation is not None
+            handled_result = dispatch_mutation(event=event)
         if inspect.isawaitable(handled_result):
             handled_result = await handled_result
         handled = bool(handled_result)

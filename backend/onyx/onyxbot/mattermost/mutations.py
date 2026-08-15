@@ -172,6 +172,33 @@ class AuthoritativePlatformGatewayBridge:
             return None
         return hierarchy()
 
+    def read_mattermost_attachment_promotion_destination(self, proposal: object) -> Any:
+        read_back = getattr(
+            self._gateway,
+            "read_mattermost_attachment_promotion_destination",
+            None,
+        )
+        if not callable(read_back):
+            raise ValueError(
+                "configured platform gateway cannot read promotion destination"
+            )
+        return read_back(proposal)
+
+    def get_mattermost_attachment_promotion_freshness(self, proposal: object) -> str:
+        freshness = getattr(
+            self._gateway,
+            "get_mattermost_attachment_promotion_freshness",
+            None,
+        )
+        if not callable(freshness):
+            raise ValueError(
+                "configured platform gateway cannot prove promotion freshness"
+            )
+        proof = freshness(proposal)
+        if type(proof) is not str:
+            raise ValueError("promotion freshness proof must be a string")
+        return proof
+
 
 class MattermostMutationAdapter:
     """Resolve current authority and route mutations only to the controlled gateway."""
