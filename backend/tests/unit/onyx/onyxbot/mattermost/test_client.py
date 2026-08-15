@@ -19,12 +19,14 @@ class _FakeResponse:
         status: int,
         *,
         payload: dict[str, object] | None = None,
+        content: bytes = b"",
         headers: Mapping[str, str] | None = None,
         text: str = "rate limited",
     ) -> None:
         self.status = status
         self.headers = headers or {}
         self._payload = payload or {}
+        self._content = content
         self._text = text
 
     async def __aenter__(self) -> "_FakeResponse":
@@ -38,6 +40,9 @@ class _FakeResponse:
 
     async def json(self) -> dict[str, object]:
         return self._payload
+
+    async def read(self) -> bytes:
+        return self._content
 
 
 class _FakeSession:
@@ -166,6 +171,96 @@ async def test_is_channel_member_returns_false_when_user_was_removed() -> None:
     )
 
     assert not await client.is_channel_member(channel_id="channel-1", user_id="user-1")
+
+
+@pytest.mark.asyncio
+async def test_get_file_info_preserves_authoritative_metadata() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload={
+                    "id": "file-1",
+                    "user_id": "uploader-1",
+                    "post_id": "post-1",
+                    "name": "brief.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 1234,
+                    "create_at": 1786720000123,
+                },
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    info = await client.get_file_info("file-1")
+
+    assert info.id == "file-1"
+    assert info.uploader_user_id == "uploader-1"
+    assert info.post_id == "post-1"
+    assert info.filename == "brief.pdf"
+    assert info.mime_type == "application/pdf"
+    assert info.size_bytes == 1234
+    assert info.create_at == 1786720000123
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/files/file-1/info",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_user_info_preserves_sender_attribution() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                payload={
+                    "id": "user-1",
+                    "username": "ada",
+                    "first_name": "Ada",
+                    "last_name": "Lovelace",
+                    "nickname": "Countess",
+                },
+            )
+        ]
+    )
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    info = await client.get_user_info("user-1")
+
+    assert info.id == "user-1"
+    assert info.username == "ada"
+    assert info.display_name == "Ada Lovelace"
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/users/user-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_file_returns_bot_authorized_content() -> None:
+    session = _FakeSession([_FakeResponse(200, content=b"report bytes")])
+    client = MattermostClient(
+        "https://mattermost.example.test",
+        "dummy-token",
+        session=cast(aiohttp.ClientSession, cast(Any, session)),
+    )
+
+    content = await client.download_file("file-1")
+
+    assert content == b"report bytes"
+    assert session.requests[0][0][:2] == (
+        "GET",
+        "https://mattermost.example.test/api/v4/files/file-1",
+    )
 
 
 class _RaisingSession:

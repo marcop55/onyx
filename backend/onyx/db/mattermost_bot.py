@@ -12,6 +12,7 @@ from onyx.db.chat import create_chat_session, get_or_create_root_message
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.models import (
     ChatSession,
+    MattermostAttachment,
     MattermostEventState,
     MattermostThreadMapping,
 )
@@ -46,6 +47,13 @@ def claim_durable_mattermost_event(
     event_type: str,
     mapping_id: int | None,
     source_post_id: str,
+    root_post_id: str | None = None,
+    source_user_id: str | None = None,
+    source_username: str | None = None,
+    source_display_name: str | None = None,
+    source_create_at: int | None = None,
+    source_update_at: int | None = None,
+    source_delete_at: int | None = None,
     now: datetime.datetime | None = None,
     lease_seconds: int = 300,
 ) -> MattermostEventClaim:
@@ -67,6 +75,13 @@ def claim_durable_mattermost_event(
             event_type=event_type,
             mapping_id=mapping_id,
             source_post_id=source_post_id,
+            root_post_id=root_post_id,
+            source_user_id=source_user_id,
+            source_username=source_username,
+            source_display_name=source_display_name,
+            source_create_at=source_create_at,
+            source_update_at=source_update_at,
+            source_delete_at=source_delete_at,
             state="claimed",
             claim_owner=owner,
             lease_expires_at=lease_expires_at,
@@ -104,6 +119,65 @@ def claim_durable_mattermost_event(
     event.lease_expires_at = lease_expires_at
     db_session.commit()
     return MattermostEventClaim(MattermostClaimOutcome.PROCESS, event, owner)
+
+
+def record_mattermost_attachment(
+    db_session: Session,
+    *,
+    event_id: int,
+    mattermost_file_id: str,
+    source_post_id: str,
+    uploader_user_id: str,
+    filename: str,
+    mime_type: str,
+    channel_id: str,
+    root_post_id: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    create_at: int | None = None,
+    file_store_id: str | None = None,
+    user_file_id: UUID | None = None,
+) -> MattermostAttachment:
+    inserted_id = db_session.scalar(
+        postgresql.insert(MattermostAttachment)
+        .values(
+            event_id=event_id,
+            mattermost_file_id=mattermost_file_id,
+            source_post_id=source_post_id,
+            uploader_user_id=uploader_user_id,
+            filename=filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            channel_id=channel_id,
+            root_post_id=root_post_id,
+            create_at=create_at,
+            file_store_id=file_store_id,
+            user_file_id=user_file_id,
+        )
+        .on_conflict_do_update(
+            constraint="uq_mattermost_attachment_event_file",
+            set_={
+                "source_post_id": source_post_id,
+                "uploader_user_id": uploader_user_id,
+                "filename": filename,
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+                "sha256": sha256,
+                "channel_id": channel_id,
+                "root_post_id": root_post_id,
+                "create_at": create_at,
+                "file_store_id": file_store_id,
+                "user_file_id": user_file_id,
+            },
+        )
+        .returning(MattermostAttachment.id)
+    )
+    assert inserted_id is not None
+    attachment = db_session.get(MattermostAttachment, inserted_id)
+    assert attachment is not None
+    db_session.commit()
+    return attachment
 
 
 def _checkpoint_mattermost_event(
@@ -293,6 +367,42 @@ def complete_mattermost_feedback_event(
     )
     db_session.flush()
     event.feedback_id = feedback.id
+    event.state = "completed"
+    event.claim_owner = None
+    event.lease_expires_at = None
+    db_session.commit()
+    return True
+
+
+def complete_mattermost_control_event(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+) -> bool:
+    """Complete an auditable event that does not create an Onyx chat turn."""
+    event = db_session.scalar(
+        select(MattermostEventState)
+        .where(
+            MattermostEventState.id == event_id,
+            MattermostEventState.claim_owner == claim_owner,
+            MattermostEventState.state != "completed",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if event is None:
+        db_session.rollback()
+        return False
+    if event.mapping_id is not None:
+        mapping = db_session.get(
+            MattermostThreadMapping, event.mapping_id, with_for_update=True
+        )
+        if mapping is not None:
+            processed_event_ids = list(mapping.processed_event_ids)
+            if event.dedupe_key not in processed_event_ids:
+                processed_event_ids.append(event.dedupe_key)
+                mapping.processed_event_ids = processed_event_ids[-10_000:]
     event.state = "completed"
     event.claim_owner = None
     event.lease_expires_at = None

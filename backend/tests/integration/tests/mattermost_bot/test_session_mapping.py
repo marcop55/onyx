@@ -38,6 +38,7 @@ from onyx.db.mattermost_bot import (
     get_mattermost_thread_mapping_by_chat_session_id,
     get_or_create_mattermost_thread_mapping,
     hydrate_mattermost_listener_config,
+    record_mattermost_attachment,
     record_mattermost_event_state,
     tombstone_mattermost_thread_mapping,
     update_mattermost_thread_parent_message,
@@ -46,6 +47,7 @@ from onyx.db.models import (
     ChatMessage,
     ChatMessageFeedback,
     ChatSession,
+    MattermostAttachment,
     MattermostEventState,
     MattermostThreadMapping,
     Persona,
@@ -261,6 +263,136 @@ def test_parent_message_mapping_can_advance(
     )
 
     assert updated_mapping.parent_message_id == user_message.id
+
+    _cleanup_mattermost_rows(db_session)
+
+
+def test_claim_durable_event_records_turn_provenance(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    _cleanup_mattermost_rows(db_session)
+    mapping = get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-team-provenance",
+        channel_id="mattermost-test-channel-provenance",
+        root_id="root-provenance",
+        mattermost_user_id="user-original",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+
+    claim = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id="mattermost-test-channel-provenance",
+        dedupe_key="event:provenance",
+        event_type="channel_mention",
+        mapping_id=mapping.id,
+        source_post_id="post-provenance",
+        source_user_id="user-provenance",
+        source_username="aprovenance",
+        source_display_name="Ada Provenance",
+        root_post_id="root-provenance",
+        source_create_at=1786720000123,
+        source_update_at=1786720000456,
+    )
+
+    stored_event = db_session.get(MattermostEventState, claim.event.id)
+
+    assert stored_event is not None
+    assert stored_event.source_user_id == "user-provenance"
+    assert stored_event.source_username == "aprovenance"
+    assert stored_event.source_display_name == "Ada Provenance"
+    assert stored_event.root_post_id == "root-provenance"
+    assert stored_event.source_create_at == 1786720000123
+    assert stored_event.source_update_at == 1786720000456
+
+    _cleanup_mattermost_rows(db_session)
+
+
+def test_same_named_attachments_from_two_users_are_distinct_and_replay_safe(
+    db_session: Session,
+    test_persona: Persona,
+) -> None:
+    _cleanup_mattermost_rows(db_session)
+    mapping = get_or_create_mattermost_thread_mapping(
+        db_session=db_session,
+        server_id="mattermost-test-team-attachments",
+        channel_id="mattermost-test-channel-attachments",
+        root_id="root-attachments",
+        mattermost_user_id="user-1",
+        persona_id=test_persona.id,
+        onyx_user_id=None,
+    )
+    first_event = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id="mattermost-test-channel-attachments",
+        dedupe_key="event:attachment:first",
+        event_type="channel_mention",
+        mapping_id=mapping.id,
+        source_post_id="post-attachment-first",
+    ).event
+    second_event = claim_durable_mattermost_event(
+        db_session,
+        instance_id="mattermost-test-instance",
+        channel_id="mattermost-test-channel-attachments",
+        dedupe_key="event:attachment:second",
+        event_type="thread_reply_followup",
+        mapping_id=mapping.id,
+        source_post_id="post-attachment-second",
+    ).event
+
+    first = record_mattermost_attachment(
+        db_session,
+        event_id=first_event.id,
+        mattermost_file_id="mattermost-file-first",
+        source_post_id="post-attachment-first",
+        uploader_user_id="user-1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        channel_id="mattermost-test-channel-attachments",
+        file_store_id="mattermost/instance/channel/file-first",
+    )
+    second = record_mattermost_attachment(
+        db_session,
+        event_id=second_event.id,
+        mattermost_file_id="mattermost-file-second",
+        source_post_id="post-attachment-second",
+        uploader_user_id="user-2",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        channel_id="mattermost-test-channel-attachments",
+        file_store_id="mattermost/instance/channel/file-second",
+    )
+    replay = record_mattermost_attachment(
+        db_session,
+        event_id=first_event.id,
+        mattermost_file_id="mattermost-file-first",
+        source_post_id="post-attachment-first",
+        uploader_user_id="user-1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        channel_id="mattermost-test-channel-attachments",
+        file_store_id="mattermost/instance/channel/file-first",
+    )
+
+    assert first.id != second.id
+    assert replay.id == first.id
+    attachments = list(
+        db_session.scalars(
+            select(MattermostAttachment).where(
+                MattermostAttachment.event_id.in_([first_event.id, second_event.id])
+            )
+        )
+    )
+    assert len(attachments) == 2
+    assert {attachment.uploader_user_id for attachment in attachments} == {
+        "user-1",
+        "user-2",
+    }
+    assert {attachment.filename for attachment in attachments} == {"report.pdf"}
 
     _cleanup_mattermost_rows(db_session)
 

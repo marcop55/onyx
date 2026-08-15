@@ -32,6 +32,10 @@ class MattermostPost:
     user_id: str = ""
     channel_id: str = ""
     pending_post_id: str = ""
+    file_ids: tuple[str, ...] = ()
+    create_at: int | None = None
+    update_at: int | None = None
+    delete_at: int | None = None
     props: dict[str, object] = field(default_factory=dict)
 
 
@@ -43,6 +47,28 @@ class MattermostReaction:
     post_id: str
     emoji_name: str
     channel_id: str = ""
+
+
+@dataclass(frozen=True)
+class MattermostFileInfo:
+    """Mattermost file metadata used for durable attachment provenance."""
+
+    id: str
+    uploader_user_id: str
+    post_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int | None = None
+    create_at: int | None = None
+
+
+@dataclass(frozen=True)
+class MattermostUserInfo:
+    """Mattermost sender identity retained for turn attribution."""
+
+    id: str
+    username: str
+    display_name: str
 
 
 @dataclass(frozen=True)
@@ -100,6 +126,12 @@ class NormalizedMattermostEvent:
     text: str = ""
     raw_event_type: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
+    file_ids: tuple[str, ...] = ()
+    source_create_at: int | None = None
+    source_update_at: int | None = None
+    source_delete_at: int | None = None
+    source_username: str | None = None
+    source_display_name: str | None = None
     feedback_answer_post_id: str | None = None
     feedback_action: QAFeedbackType | None = None
     feedback_message_id: int | None = None

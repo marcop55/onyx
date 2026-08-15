@@ -19,6 +19,7 @@ from onyx.onyxbot.mattermost.models import (
     MattermostListenerConfig,
     MattermostNormalizedEventType,
     MattermostPost,
+    MattermostUserInfo,
 )
 
 _APPROVED_USER_ID = "user_1"
@@ -411,6 +412,29 @@ def test_mattermost_websocket_payload_is_parsed_to_typed_event() -> None:
     assert envelope.post.message == "help"
 
 
+def test_mattermost_post_payload_preserves_file_ids_and_timestamps() -> None:
+    envelope = mattermost_event_from_payload(
+        {
+            "event": "posted",
+            "seq": 14,
+            "data": {
+                "post": (
+                    '{"id":"post_with_files","channel_id":"channel_1",'
+                    '"user_id":"user_1","message":"see attached",'
+                    '"file_ids":["file_a","file_b"],'
+                    '"create_at":1786720000123,"update_at":1786720000456}'
+                ),
+            },
+            "broadcast": {"team_id": "team_1", "channel_id": "channel_1"},
+        }
+    )
+
+    assert envelope.post is not None
+    assert envelope.post.file_ids == ("file_a", "file_b")
+    assert envelope.post.create_at == 1786720000123
+    assert envelope.post.update_at == 1786720000456
+
+
 def test_real_reaction_added_payload_emits_typed_feedback_event() -> None:
     envelope = mattermost_event_from_payload(
         {
@@ -549,6 +573,13 @@ class _FlakyClient:
         _ = channel_id, user_id
         return True
 
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo:
+        return MattermostUserInfo(
+            id=user_id,
+            username="ada",
+            display_name="Ada Lovelace",
+        )
+
 
 class _MembershipClient:
     def __init__(
@@ -572,6 +603,13 @@ class _MembershipClient:
         if self._fail_membership_lookup:
             raise MattermostClientError("membership lookup failed")
         return self._memberships.get((channel_id, user_id), False)
+
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo:
+        return MattermostUserInfo(
+            id=user_id,
+            username="ada",
+            display_name="Ada Lovelace",
+        )
 
 
 class _ChangingMembershipClient:
@@ -597,6 +635,13 @@ class _ChangingMembershipClient:
         )
         return self._membership_snapshots[snapshot_index].get(
             (channel_id, user_id), False
+        )
+
+    async def get_user_info(self, user_id: str) -> MattermostUserInfo:
+        return MattermostUserInfo(
+            id=user_id,
+            username="ada",
+            display_name="Ada Lovelace",
         )
 
 
@@ -655,6 +700,8 @@ async def test_listener_authorizes_events_with_current_membership(
         (channel_id, _BOT_USER_ID),
         (channel_id, _APPROVED_USER_ID),
     ]
+    assert event.source_username == "ada"
+    assert event.source_display_name == "Ada Lovelace"
 
 
 @pytest.mark.asyncio
