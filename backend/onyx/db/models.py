@@ -3459,6 +3459,8 @@ class MattermostEventState(Base):
     )
     mattermost_pending_post_id: Mapped[str] = mapped_column(String, nullable=False)
     mattermost_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    delivery_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    terminal_outcome: Mapped[str | None] = mapped_column(String, nullable=True)
     onyx_user_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
     )

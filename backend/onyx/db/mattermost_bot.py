@@ -17,7 +17,11 @@ from onyx.db.models import (
     MattermostSlashCommandConfig,
     MattermostThreadMapping,
 )
-from onyx.onyxbot.mattermost.models import MattermostListenerConfig
+from onyx.onyxbot.mattermost.models import (
+    MattermostDeliveryTerminalOutcome,
+    MattermostListenerConfig,
+    MattermostResponseDeliveryMode,
+)
 
 DEFAULT_MATTERMOST_TEAM_ID = "global"
 MATTERMOST_CONTEXT_POST_ID_PREFIX = "context_post:"
@@ -298,6 +302,40 @@ def checkpoint_mattermost_post(
     )
 
 
+def checkpoint_mattermost_delivery_mode(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    delivery_mode: MattermostResponseDeliveryMode,
+) -> bool:
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values={"delivery_mode": delivery_mode.value},
+    )
+
+
+def checkpoint_mattermost_terminal_outcome(
+    db_session: Session,
+    *,
+    event_id: int,
+    claim_owner: UUID,
+    terminal_outcome: MattermostDeliveryTerminalOutcome,
+    post_id: str | None = None,
+) -> bool:
+    values: dict[str, object] = {"terminal_outcome": terminal_outcome.value}
+    if post_id is not None:
+        values["mattermost_post_id"] = post_id
+    return _checkpoint_mattermost_event(
+        db_session,
+        event_id=event_id,
+        claim_owner=claim_owner,
+        values=values,
+    )
+
+
 def checkpoint_mattermost_turn(
     db_session: Session,
     *,
@@ -372,9 +410,13 @@ def complete_mattermost_answer_event(
     if event is None:
         db_session.rollback()
         return False
+    delivered_ephemeral = (
+        event.delivery_mode == MattermostResponseDeliveryMode.EPHEMERAL.value
+        and event.terminal_outcome == MattermostDeliveryTerminalOutcome.DELIVERED.value
+    )
     if (
         event.mapping_id is None
-        or event.mattermost_post_id is None
+        or (event.mattermost_post_id is None and not delivered_ephemeral)
         or event.onyx_assistant_message_id is None
         or event.rendered_message is None
     ):
@@ -389,7 +431,10 @@ def complete_mattermost_answer_event(
 
     mapping.parent_message_id = event.onyx_assistant_message_id
     answer_post_message_ids = dict(mapping.answer_post_message_ids)
-    answer_post_message_ids[event.mattermost_post_id] = event.onyx_assistant_message_id
+    if event.mattermost_post_id is not None:
+        answer_post_message_ids[event.mattermost_post_id] = (
+            event.onyx_assistant_message_id
+        )
     mapping.answer_post_message_ids = answer_post_message_ids
     processed_event_ids = list(mapping.processed_event_ids)
     if event.dedupe_key not in processed_event_ids:

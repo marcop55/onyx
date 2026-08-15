@@ -150,14 +150,20 @@ MATTERMOST_SLACK_PARITY_MATRIX: tuple[SlackToMattermostCapability, ...] = (
         key="ephemeral_or_private_answer",
         area=SlackCapabilityArea.INTERACTION,
         slack_capability="Slack ephemeral answers and private publication controls.",
-        mattermost_contract="Mattermost ephemeral posts are a native equivalent, but this release answers visibly in-thread to avoid identity leaks.",
-        status=MattermostParityStatus.PLATFORM_GAP,
+        mattermost_contract="Mattermost-native ephemeral posts deliver slash-command and configured private answers only to the originating sender, with durable delivery mode and terminal outcome checkpoints so replay cannot promote them to public posts or rerun the model.",
+        status=MattermostParityStatus.MATTERMOST_NATIVE_EQUIVALENT,
         evidence=(
-            "docs/mattermost-adapter.md:Failure contract",
+            "backend/onyx/onyxbot/mattermost/client.py:create_ephemeral_post",
+            "backend/onyx/onyxbot/mattermost/streaming.py:stream_mattermost_ephemeral_answer",
+            "backend/onyx/onyxbot/mattermost/handler.py:_resolve_delivery_mode",
+            "backend/onyx/db/mattermost_bot.py:checkpoint_mattermost_terminal_outcome",
+            "backend/tests/unit/onyx/onyxbot/mattermost/test_ephemeral_responses.py",
             *_MEMBERSHIP_EVIDENCE,
+            *_LEDGER_EVIDENCE,
         ),
-        guarantees=frozenset({"membership_fail_closed", "shared_full_corpus"}),
-        fallback="Use visible thread replies until issue #34 ships explicit ephemeral response handling.",
+        guarantees=frozenset(
+            {"membership_fail_closed", "shared_full_corpus", "replay_safe"}
+        ),
     ),
     SlackToMattermostCapability(
         key="interactive_retry_control",

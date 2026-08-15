@@ -122,6 +122,31 @@ class MattermostClient:
         )
         return _post_from_mapping(cast(Mapping[object, object], response))
 
+    async def create_ephemeral_post(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        message: str,
+        root_id: str = "",
+        props: dict[str, object] | None = None,
+    ) -> MattermostPost:
+        """Create a Mattermost ephemeral post visible only to one user."""
+
+        post_payload: dict[str, object] = {
+            "channel_id": channel_id,
+            "message": message,
+            "root_id": root_id,
+        }
+        if props is not None:
+            post_payload["props"] = props
+        response = await self._request_json(
+            "POST",
+            "/api/v4/posts/ephemeral",
+            json={"user_id": user_id, "post": post_payload},
+        )
+        return _post_from_mapping(cast(Mapping[object, object], response))
+
     async def find_post_by_idempotency_fields(
         self,
         *,
