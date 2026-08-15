@@ -56,6 +56,14 @@ class MattermostStandardAnswerClient(Protocol):
         props: dict[str, object] | None = None,
     ) -> MattermostPost: ...
 
+    async def find_post_by_idempotency_fields(
+        self,
+        *,
+        channel_id: str,
+        pending_post_id: str,
+        event_key: str,
+    ) -> MattermostPost | None: ...
+
 
 StandardAnswerMatcher = Callable[..., list[MattermostStandardAnswer]]
 StandardAnswerClaimer = Callable[..., MattermostEventClaim]
@@ -108,17 +116,13 @@ async def handle_mattermost_standard_answer_event(
     if claim.outcome is not MattermostClaimOutcome.PROCESS or claim.claim_owner is None:
         return True
 
-    message = _render_standard_answers(matches)
-    await client.create_post(
-        channel_id=event.channel_id,
-        root_id=event.root_post_id,
-        message=message,
+    await _find_or_create_standard_answer_post(
+        client=client,
+        event=event,
+        event_key=str(claim.event.id),
         pending_post_id=claim.event.mattermost_pending_post_id,
-        props={
-            "onyx_event_key": str(claim.event.id),
-            "onyx_standard_answer_ids": [match.id for match in matches],
-            "onyx_standard_answer_matches": [match.match for match in matches],
-        },
+        message=_render_standard_answers(matches),
+        matches=matches,
     )
     completer = complete_event or _complete_standard_answer_event
     return completer(
@@ -234,6 +238,35 @@ def _complete_standard_answer_event(
         db_session,
         event_id=event_id,
         claim_owner=claim_owner,
+    )
+
+
+async def _find_or_create_standard_answer_post(
+    *,
+    client: MattermostStandardAnswerClient,
+    event: NormalizedMattermostEvent,
+    event_key: str,
+    pending_post_id: str,
+    message: str,
+    matches: list[MattermostStandardAnswer],
+) -> MattermostPost:
+    existing_post = await client.find_post_by_idempotency_fields(
+        channel_id=event.channel_id,
+        pending_post_id=pending_post_id,
+        event_key=event_key,
+    )
+    if existing_post is not None:
+        return existing_post
+    return await client.create_post(
+        channel_id=event.channel_id,
+        root_id=event.root_post_id,
+        message=message,
+        pending_post_id=pending_post_id,
+        props={
+            "onyx_event_key": event_key,
+            "onyx_standard_answer_ids": [match.id for match in matches],
+            "onyx_standard_answer_matches": [match.match for match in matches],
+        },
     )
 
 

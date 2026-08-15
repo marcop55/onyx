@@ -26,6 +26,7 @@ class StandardAnswerClient:
         self.membership_calls: list[tuple[str, str]] = []
         self.posts: list[dict[str, Any]] = []
         self.ephemeral_posts: list[dict[str, Any]] = []
+        self.find_post_calls: list[dict[str, str]] = []
 
     async def is_channel_member(self, *, channel_id: str, user_id: str) -> bool:
         self.membership_calls.append((channel_id, user_id))
@@ -34,6 +35,38 @@ class StandardAnswerClient:
     async def create_post(self, **kwargs: Any) -> MattermostPost:
         self.posts.append(kwargs)
         return MattermostPost(id=f"standard-answer-{len(self.posts)}")
+
+    async def find_post_by_idempotency_fields(
+        self,
+        *,
+        channel_id: str,
+        pending_post_id: str,
+        event_key: str,
+    ) -> MattermostPost | None:
+        self.find_post_calls.append(
+            {
+                "channel_id": channel_id,
+                "pending_post_id": pending_post_id,
+                "event_key": event_key,
+            }
+        )
+        for index, post in enumerate(self.posts, start=1):
+            props = post.get("props")
+            if not isinstance(props, dict):
+                continue
+            if (
+                post.get("pending_post_id") == pending_post_id
+                or props.get("onyx_event_key") == event_key
+            ):
+                return MattermostPost(
+                    id=f"standard-answer-{index}",
+                    message=str(post.get("message") or ""),
+                    root_id=str(post.get("root_id") or ""),
+                    channel_id=str(post.get("channel_id") or ""),
+                    pending_post_id=str(post.get("pending_post_id") or ""),
+                    props=dict(props),
+                )
+        return None
 
     async def create_ephemeral_post(self, **kwargs: Any) -> MattermostPost:
         self.ephemeral_posts.append(kwargs)
@@ -147,6 +180,83 @@ async def test_replay_does_not_duplicate_standard_answer_post() -> None:
     assert handled is True
     assert client.posts == []
     assert client.ephemeral_posts == []
+
+
+@pytest.mark.asyncio
+async def test_replay_reuses_visible_standard_answer_after_completion_crash_window() -> (
+    None
+):
+    client = StandardAnswerClient(memberships=[True, True, True, True])
+    first_owner = uuid4()
+    second_owner = uuid4()
+    claimed_event = SimpleNamespace(
+        id=99,
+        mattermost_pending_post_id="pending-standard-answer",
+    )
+    matches = [
+        MattermostStandardAnswer(
+            id=3,
+            answer="Use the incident runbook in Seafile.",
+            match="incident runbook",
+        )
+    ]
+    claims = iter(
+        [
+            MattermostEventClaim(
+                MattermostClaimOutcome.PROCESS,
+                cast(MattermostEventState, claimed_event),
+                first_owner,
+            ),
+            MattermostEventClaim(
+                MattermostClaimOutcome.PROCESS,
+                cast(MattermostEventState, claimed_event),
+                second_owner,
+            ),
+        ]
+    )
+    completed: list[tuple[int, object]] = []
+
+    def complete_event(**kwargs: object) -> bool:
+        completed.append((cast(int, kwargs["event_id"]), kwargs["claim_owner"]))
+        return len(completed) == 2
+
+    first_handled = await handle_mattermost_standard_answer_event(
+        event=_event(text="Where is the incident runbook?"),
+        bot_user_id="bot-1",
+        client=client,
+        db_session=object(),
+        channel_config={"standard_answer_category_ids": [7]},
+        find_matches=lambda **_kwargs: matches,
+        claim_event=lambda **_kwargs: next(claims),
+        complete_event=complete_event,
+    )
+    second_handled = await handle_mattermost_standard_answer_event(
+        event=_event(text="Where is the incident runbook?"),
+        bot_user_id="bot-1",
+        client=client,
+        db_session=object(),
+        channel_config={"standard_answer_category_ids": [7]},
+        find_matches=lambda **_kwargs: matches,
+        claim_event=lambda **_kwargs: next(claims),
+        complete_event=complete_event,
+    )
+
+    assert first_handled is False
+    assert second_handled is True
+    assert len(client.posts) == 1
+    assert completed == [(99, first_owner), (99, second_owner)]
+    assert client.find_post_calls == [
+        {
+            "channel_id": "channel-1",
+            "pending_post_id": "pending-standard-answer",
+            "event_key": "99",
+        },
+        {
+            "channel_id": "channel-1",
+            "pending_post_id": "pending-standard-answer",
+            "event_key": "99",
+        },
+    ]
 
 
 @pytest.mark.asyncio
