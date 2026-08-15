@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -474,17 +474,43 @@ class MattermostBot(BaseModel):
         )
 
 
-class MattermostChannelConfigRequest(BaseModel):
+class MattermostResponseStyle(str, Enum):
+    DEFAULT = "default"
+    ORKA_CONCISE = "orka_concise"
+
+
+class MattermostChannelConfigCreationRequest(BaseModel):
     mattermost_bot_id: int
-    channel_id: str
-    is_ephemeral: bool = True
+    channel_id: str | None = None
+    channel_name: str | None = None
+    persona_id: int | None = None
+    respond_tag_only: bool = True
+    response_style: MattermostResponseStyle = MattermostResponseStyle.ORKA_CONCISE
+    disabled: bool = False
+    is_default: bool = False
+    is_ephemeral: bool = False
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_channel_identity(self) -> "MattermostChannelConfigCreationRequest":
+        if not self.is_default and not self.channel_id:
+            raise ValueError("Mattermost channel ID is required")
+        if self.is_default and self.channel_id is not None:
+            raise ValueError("Default Mattermost config cannot target a channel")
+        return self
+
+
+MattermostChannelConfigRequest = MattermostChannelConfigCreationRequest
 
 
 class MattermostChannelConfig(BaseModel):
     id: int
     mattermost_bot_id: int
-    channel_id: str
+    channel_id: str | None
+    channel_name: str | None
+    persona: PersonaSnapshot | None
+    channel_config: ChannelConfig
+    is_default: bool
     is_ephemeral: bool
     enabled: bool
 
@@ -496,6 +522,14 @@ class MattermostChannelConfig(BaseModel):
             id=config_model.id,
             mattermost_bot_id=config_model.mattermost_bot_id,
             channel_id=config_model.channel_id,
+            channel_name=config_model.channel_name,
+            persona=(
+                FullPersonaSnapshot.from_model(config_model.persona, allow_deleted=True)
+                if config_model.persona
+                else None
+            ),
+            channel_config=cast(ChannelConfig, config_model.channel_config),
+            is_default=config_model.is_default,
             is_ephemeral=config_model.is_ephemeral,
             enabled=config_model.enabled,
         )

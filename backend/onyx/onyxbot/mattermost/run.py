@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -18,6 +18,7 @@ from onyx.configs.app_configs import (
 )
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import (
+    fetch_mattermost_channel_config_for_bot_and_channel,
     fetch_mattermost_private_answer_channel_ids,
     get_or_bootstrap_mattermost_slash_command_config,
     hydrate_mattermost_listener_config,
@@ -181,33 +182,57 @@ async def _run_bot(
     with get_session_with_current_tenant() as db_session:
         hydrate_mattermost_listener_config(db_session, config.listener_config)
 
-    with get_session_with_current_tenant() as db_session:
-        handler_config = _build_handler_config(config, db_session)
+    listener_config = replace(
+        config.listener_config,
+        managed_channel_config_resolver=_build_managed_channel_config_resolver(config),
+    )
     async with MattermostClient(
         config.url,
         config.token,
         request_timeout_seconds=config.request_timeout_seconds,
     ) as client:
         await client.get_me()
+        mutation_adapter = None
         if config.mutation_gateway_factory is not None:
             bridge = AuthoritativePlatformGatewayBridge.from_factory_spec(
                 config.mutation_gateway_factory
             )
-            handler_config = replace(
-                handler_config,
-                mutation_adapter=MattermostMutationAdapter(client, bridge),
-            )
-        listener = MattermostEventListener(client, config.listener_config)
+            mutation_adapter = MattermostMutationAdapter(client, bridge)
+        listener = MattermostEventListener(client, listener_config)
         if ready_event is not None:
             ready_event.set()
         async for event in listener.normalized_events():
             with get_session_with_current_tenant() as db_session:
+                handler_config = replace(
+                    _build_handler_config(config, db_session),
+                    mutation_adapter=mutation_adapter,
+                )
                 await handle_normalized_mattermost_event(
                     event=event,
                     config=handler_config,
                     client=client,
                     db_session=db_session,
                 )
+
+
+def _build_managed_channel_config_resolver(
+    config: MattermostBotConfig,
+) -> Callable[[str], dict[str, object] | None]:
+    instance_id = canonical_mattermost_instance_id(config.url)
+
+    def resolve_channel_config(channel_id: str) -> dict[str, object] | None:
+        with get_session_with_current_tenant() as db_session:
+            channel_config = fetch_mattermost_channel_config_for_bot_and_channel(
+                db_session,
+                instance_id=instance_id,
+                bot_user_id=config.listener_config.bot_user_id,
+                channel_id=channel_id,
+            )
+        if channel_config is None:
+            return None
+        return dict(channel_config.channel_config)
+
+    return resolve_channel_config
 
 
 def _build_handler_config(
@@ -223,6 +248,7 @@ def _build_handler_config(
     return MattermostHandlerConfig(
         persona_id=config.persona_id,
         instance_id=instance_id,
+        bot_user_id=config.listener_config.bot_user_id,
         owned_thread_root_ids=config.listener_config.owned_thread_root_ids,
         tombstoned_thread_root_ids=config.listener_config.tombstoned_thread_root_ids,
         owned_answer_post_root_ids=config.listener_config.owned_answer_post_root_ids,

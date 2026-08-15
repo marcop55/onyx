@@ -479,7 +479,7 @@ export type AnswerFilterOption =
   | "questionmark_prefilter";
 
 export interface ChannelConfig {
-  channel_name: string;
+  channel_name: string | null;
   respond_tag_only?: boolean;
   respond_to_bots?: boolean;
   is_ephemeral?: boolean;
@@ -488,6 +488,7 @@ export interface ChannelConfig {
   answer_filters?: AnswerFilterOption[];
   follow_up_tags?: string[];
   disabled?: boolean;
+  response_style?: "default" | "orka_concise";
 }
 
 export type SlackBotResponseType = "quotes" | "citations";
@@ -543,13 +544,17 @@ export type MattermostBot = {
   health_error?: string | null;
 };
 
-export type MattermostChannelConfig = {
+export interface MattermostChannelConfig {
   id: number;
   mattermost_bot_id: number;
-  channel_id: string;
+  channel_id: string | null;
+  channel_name: string | null;
+  persona: Agent | null;
+  channel_config: ChannelConfig;
+  is_default: boolean;
   is_ephemeral: boolean;
   enabled: boolean;
-};
+}
 
 /* EE Only Types */
 export interface UserGroup {
