@@ -113,7 +113,6 @@ class MattermostHandlerConfig:
     ephemeral_response_channel_ids: frozenset[str] = frozenset()
     interactive_signing_secret: str | None = None
     interactive_url: str | None = None
-    bot_user_id: str | None = None
 
 
 format_mattermost_answer = _format_mattermost_answer
@@ -793,12 +792,15 @@ def _resolve_mattermost_channel_config(
 ) -> Any | None:
     if config.bot_user_id is None:
         return None
-    return fetch_mattermost_channel_config_for_bot_and_channel(
+    channel_config = fetch_mattermost_channel_config_for_bot_and_channel(
         db_session,
         instance_id=config.instance_id,
         bot_user_id=config.bot_user_id,
         channel_id=event.channel_id,
     )
+    if channel_config is None or not isinstance(channel_config.channel_config, dict):
+        return None
+    return channel_config
 
 
 def _checkpoint_mattermost_turn_packets(
