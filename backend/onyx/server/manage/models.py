@@ -439,6 +439,7 @@ class SlackBot(BaseModel):
             ),
         )
 
+
 class MattermostBotCreationRequest(BaseModel):
     name: str
     url: str
