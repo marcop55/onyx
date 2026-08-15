@@ -3488,6 +3488,32 @@ class MattermostAttachment(Base):
     )
 
 
+class MattermostBot(Base):
+    __tablename__ = "mattermost_bot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    url: Mapped[str] = mapped_column(String, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    token: Mapped[SensitiveValue[str] | None] = mapped_column(
+        EncryptedString(), nullable=False, unique=True
+    )
+    bot_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    bot_username: Mapped[str] = mapped_column(String, nullable=False)
+    health_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default="unknown"
+    )
+    health_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    time_updated: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SearchDoc(Base):
     """Different from Document table. This one stores the state of a document from a retrieval.
     This allows chat sessions to be replayed with the searched docs

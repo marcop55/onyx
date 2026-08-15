@@ -15,6 +15,7 @@ from onyx.db.enums import (
 )
 from onyx.db.memory import MAX_MEMORIES_PER_USER
 from onyx.db.models import AllowedAnswerFilters, ChannelConfig, User
+from onyx.db.models import MattermostBot as MattermostBotModel
 from onyx.db.models import SlackBot as SlackAppModel
 from onyx.db.models import SlackChannelConfig as SlackChannelConfigModel
 from onyx.db.models import StandardAnswer as StandardAnswerModel
@@ -433,6 +434,39 @@ class SlackBot(BaseModel):
                 if slack_bot_model.user_token
                 else None
             ),
+        )
+
+
+class MattermostBotCreationRequest(BaseModel):
+    name: str
+    url: str
+    enabled: bool
+    token: str | None = None
+
+
+class MattermostBot(BaseModel):
+    id: int
+    name: str
+    url: str
+    enabled: bool
+    token: str
+    bot_user_id: str
+    bot_username: str
+    health_status: str
+    health_error: str | None = None
+
+    @classmethod
+    def from_model(cls, mattermost_bot_model: MattermostBotModel) -> "MattermostBot":
+        return cls(
+            id=mattermost_bot_model.id,
+            name=mattermost_bot_model.name,
+            url=mattermost_bot_model.url,
+            enabled=mattermost_bot_model.enabled,
+            token="",
+            bot_user_id=mattermost_bot_model.bot_user_id,
+            bot_username=mattermost_bot_model.bot_username,
+            health_status=mattermost_bot_model.health_status,
+            health_error=mattermost_bot_model.health_error,
         )
 
 
