@@ -16,8 +16,30 @@ describe("Seafile managed connector metadata", () => {
     expect(connectorConfigs[ValidSources.Seafile].values).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: "base_url", label: "Server URL" }),
-        expect.objectContaining({ name: "library_names", type: "list" }),
+        expect.objectContaining({
+          name: "library_ids",
+          label: "Library IDs",
+          optional: false,
+          type: "list",
+        }),
+        expect.objectContaining({
+          name: "adopt_existing_ingestion_api",
+          type: "checkbox",
+        }),
+        expect.objectContaining({
+          name: "ingestion_api_document_id_mappings",
+          optional: false,
+          type: "list",
+        }),
       ])
     );
+  });
+
+  it("does not expose mutable library name selection", () => {
+    const fieldNames = connectorConfigs[ValidSources.Seafile].values.map(
+      (field) => field.name
+    );
+
+    expect(fieldNames).not.toContain("library_names");
   });
 });

@@ -211,11 +211,27 @@ export const connectorConfigs: Record<
       },
       {
         type: "list",
-        label: "Library Names",
-        name: "library_names",
+        label: "Library IDs",
+        name: "library_ids",
+        optional: false,
+        description:
+          "Exact Seafile library IDs discovered from the server. Display names are not accepted because they can be renamed or duplicated.",
+      },
+      {
+        type: "checkbox",
+        label: "Adopt existing Ingestion API documents",
+        name: "adopt_existing_ingestion_api",
         optional: true,
         description:
-          "Restrict indexing to specific Seafile library names. Leave empty to index every library visible to the API token.",
+          "Keep the existing production Ingestion API document identities and source links during cutover so Seafile is not indexed twice.",
+      },
+      {
+        type: "list",
+        label: "Ingestion API document ID mappings",
+        name: "ingestion_api_document_id_mappings",
+        optional: false,
+        description:
+          "Existing document IDs keyed by library_id:path, canonical source link, path, or Seafile file ID. Missing mappings fail validation before indexing.",
       },
     ],
     advanced_values: [

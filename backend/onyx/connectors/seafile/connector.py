@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from typing import Any, Protocol, cast
@@ -46,6 +47,32 @@ class SeafileClient(Protocol):
     def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]: ...
 
     def download_text(self, file: SeafileRemoteFile) -> str: ...
+
+
+@dataclass(frozen=True)
+class SeafileAdoptionConfig:
+    adopt_existing_ingestion_api: bool = True
+    document_id_mappings: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class SeafileHealthSnapshot:
+    selected_library_count: int
+    indexed_count: int
+    excluded_count: int
+    skipped_count: int
+    error_count: int
+    adopted_ingestion_api_count: int
+
+    def as_metadata(self) -> dict[str, str]:
+        return {
+            "selected_library_count": str(self.selected_library_count),
+            "indexed_count": str(self.indexed_count),
+            "excluded_count": str(self.excluded_count),
+            "skipped_count": str(self.skipped_count),
+            "error_count": str(self.error_count),
+            "adopted_ingestion_api_count": str(self.adopted_ingestion_api_count),
+        }
 
 
 class SeafileApiClient:
@@ -185,14 +212,23 @@ class SeafileConnector(LoadConnector, PollConnector):
         self,
         *,
         base_url: str,
+        library_ids: list[str] | None = None,
         library_names: list[str] | None = None,
         excluded_paths: list[str] | None = None,
         indexable_extensions: list[str] | None = None,
+        adopt_existing_ingestion_api: bool = True,
+        ingestion_api_document_id_mappings: dict[str, str] | list[str] | None = None,
         batch_size: int = INDEX_BATCH_SIZE,
         client: SeafileClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.library_names = set(library_names or [])
+        if library_names:
+            raise ConnectorValidationError(
+                "Seafile library selection must use exact library_ids, not mutable "
+                "library_names. Discover libraries from the server, then save the "
+                "stable library IDs."
+            )
+        self.library_ids = _validate_unique_ids(library_ids or [])
         self.excluded_paths = excluded_paths or []
         self.indexable_extensions = {
             extension.lower()
@@ -200,8 +236,22 @@ class SeafileConnector(LoadConnector, PollConnector):
                 indexable_extensions or sorted(_DEFAULT_INDEXABLE_EXTENSIONS)
             )
         }
+        self.adoption = SeafileAdoptionConfig(
+            adopt_existing_ingestion_api=adopt_existing_ingestion_api,
+            document_id_mappings=_normalize_document_id_mappings(
+                ingestion_api_document_id_mappings
+            ),
+        )
         self.batch_size = batch_size
         self.client = client
+        self._last_health = SeafileHealthSnapshot(
+            selected_library_count=0,
+            indexed_count=0,
+            excluded_count=0,
+            skipped_count=0,
+            error_count=0,
+            adopted_ingestion_api_count=0,
+        )
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         token = credentials.get("seafile_api_token") or credentials.get("api_token")
@@ -217,6 +267,10 @@ class SeafileConnector(LoadConnector, PollConnector):
         if self.client is None:
             raise ConnectorMissingCredentialError("Seafile")
         self.client.validate()
+        self._selected_libraries(self.client.list_libraries())
+
+    def health_snapshot(self) -> SeafileHealthSnapshot:
+        return self._last_health
 
     def load_from_state(self) -> GenerateDocumentsOutput:
         return self._poll_source(start=None, end=None)
@@ -231,30 +285,47 @@ class SeafileConnector(LoadConnector, PollConnector):
             raise ConnectorMissingCredentialError("Seafile")
         self.client.validate()
         batch: list[Document | HierarchyNode] = []
-        for document in self._iter_documents(start=start, end=end):
+        counts = _SeafileRunCounts()
+        for document in self._iter_documents(start=start, end=end, counts=counts):
             batch.append(document)
             if len(batch) == self.batch_size:
                 yield batch
                 batch = []
         if batch:
             yield batch
+        self._last_health = counts.snapshot()
 
     def _iter_documents(
-        self, *, start: float | None, end: float | None
+        self, *, start: float | None, end: float | None, counts: "_SeafileRunCounts"
     ) -> Iterator[Document]:
         assert self.client is not None
-        for library in self._selected_libraries(self.client.list_libraries()):
+        selected_libraries = self._selected_libraries(self.client.list_libraries())
+        counts.selected_library_count = len(selected_libraries)
+        for library in selected_libraries:
             for file in self.client.iter_files(library):
                 if self._is_excluded(file.path):
+                    counts.excluded_count += 1
                     continue
                 if not self._is_indexable(file):
+                    counts.skipped_count += 1
                     continue
                 if not _is_within_poll_window(file.mtime, start=start, end=end):
+                    counts.skipped_count += 1
                     continue
                 try:
                     text = self.client.download_text(file)
-                    yield _document_from_file(self.base_url, file, text)
+                    document = _document_from_file(
+                        self.base_url,
+                        file,
+                        text,
+                        adoption=self.adoption,
+                    )
+                    counts.indexed_count += 1
+                    if document.from_ingestion_api:
+                        counts.adopted_ingestion_api_count += 1
+                    yield document
                 except Exception as exc:
+                    counts.error_count += 1
                     yield cast(
                         Document,
                         ConnectorFailure(
@@ -269,10 +340,26 @@ class SeafileConnector(LoadConnector, PollConnector):
 
     def _selected_libraries(
         self, libraries: list[SeafileLibrary]
-    ) -> Iterator[SeafileLibrary]:
-        for library in libraries:
-            if not self.library_names or library.name in self.library_names:
-                yield library
+    ) -> list[SeafileLibrary]:
+        if not self.library_ids:
+            return libraries
+
+        libraries_by_id = {library.id: library for library in libraries}
+        missing_library_ids = sorted(
+            library_id
+            for library_id in self.library_ids
+            if library_id not in libraries_by_id
+        )
+        if missing_library_ids:
+            available = (
+                ", ".join(f"{library.name} ({library.id})" for library in libraries)
+                or "none visible to this token"
+            )
+            raise ConnectorValidationError(
+                "Configured Seafile library_ids are not visible to this token: "
+                f"{', '.join(missing_library_ids)}. Available libraries: {available}."
+            )
+        return [libraries_by_id[library_id] for library_id in self.library_ids]
 
     def _is_excluded(self, path: str) -> bool:
         return any(fnmatch(path, pattern) for pattern in self.excluded_paths)
@@ -282,7 +369,13 @@ class SeafileConnector(LoadConnector, PollConnector):
         return extension in self.indexable_extensions
 
 
-def _document_from_file(base_url: str, file: SeafileRemoteFile, text: str) -> Document:
+def _document_from_file(
+    base_url: str,
+    file: SeafileRemoteFile,
+    text: str,
+    *,
+    adoption: SeafileAdoptionConfig,
+) -> Document:
     metadata: dict[str, str | list[str]] = {
         "library_id": file.library_id,
         "library_name": file.library_name,
@@ -297,19 +390,86 @@ def _document_from_file(base_url: str, file: SeafileRemoteFile, text: str) -> Do
         "modifier_name": file.modifier_name,
     }
     metadata.update({key: value for key, value in optional_metadata.items() if value})
+    document_id = _document_id(file, adoption=adoption, base_url=base_url)
+    source = (
+        DocumentSource.INGESTION_API
+        if adoption.adopt_existing_ingestion_api
+        else DocumentSource.SEAFILE
+    )
     return Document(
-        id=_document_id(file),
-        source=DocumentSource.SEAFILE,
+        id=document_id,
+        source=source,
         semantic_identifier=f"{file.library_name}{file.path}",
         title=file.name,
         sections=[TextSection(link=_canonical_link(base_url, file), text=text)],
         metadata=metadata,
         doc_updated_at=file.mtime,
+        from_ingestion_api=adoption.adopt_existing_ingestion_api,
     )
 
 
-def _document_id(file: SeafileRemoteFile) -> str:
+def _document_id(
+    file: SeafileRemoteFile,
+    *,
+    adoption: SeafileAdoptionConfig | None = None,
+    base_url: str | None = None,
+) -> str:
+    if adoption and adoption.adopt_existing_ingestion_api:
+        if base_url is None:
+            raise ConnectorValidationError(
+                "Seafile Ingestion API adoption requires base_url to resolve document IDs"
+            )
+        document_id = _adopted_document_id(
+            base_url, file, adoption.document_id_mappings
+        )
+        if document_id is None:
+            raise ConnectorValidationError(
+                "Seafile Ingestion API adoption is enabled, but no existing "
+                f"document_id mapping was found for {file.library_id}:{file.path}. "
+                "Refusing to create a second Seafile document identity before cutover."
+            )
+        return document_id
     return f"seafile:{file.library_id}:{file.path}"
+
+
+def _adopted_document_id(
+    base_url: str,
+    file: SeafileRemoteFile,
+    mappings: Mapping[str, str] | None,
+) -> str | None:
+    if not mappings:
+        return None
+    candidates = (
+        f"{file.library_id}:{file.path}",
+        _canonical_link(base_url, file),
+        file.path,
+        file.id,
+    )
+    for candidate in candidates:
+        document_id = mappings.get(candidate)
+        if document_id:
+            return document_id
+    return None
+
+
+@dataclass
+class _SeafileRunCounts:
+    selected_library_count: int = 0
+    indexed_count: int = 0
+    excluded_count: int = 0
+    skipped_count: int = 0
+    error_count: int = 0
+    adopted_ingestion_api_count: int = 0
+
+    def snapshot(self) -> SeafileHealthSnapshot:
+        return SeafileHealthSnapshot(
+            selected_library_count=self.selected_library_count,
+            indexed_count=self.indexed_count,
+            excluded_count=self.excluded_count,
+            skipped_count=self.skipped_count,
+            error_count=self.error_count,
+            adopted_ingestion_api_count=self.adopted_ingestion_api_count,
+        )
 
 
 def _canonical_link(base_url: str, file: SeafileRemoteFile) -> str:
@@ -327,6 +487,46 @@ def _file_extension(name: str) -> str:
     if "." not in name:
         return ""
     return "." + name.rsplit(".", 1)[-1].lower()
+
+
+def _validate_unique_ids(library_ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    cleaned: list[str] = []
+    for library_id in library_ids:
+        if not library_id:
+            continue
+        if library_id in seen:
+            duplicates.add(library_id)
+        seen.add(library_id)
+        cleaned.append(library_id)
+    if duplicates:
+        raise ConnectorValidationError(
+            "Seafile library_ids contains duplicates: " + ", ".join(sorted(duplicates))
+        )
+    return cleaned
+
+
+def _normalize_document_id_mappings(
+    mappings: dict[str, str] | list[str] | None,
+) -> dict[str, str]:
+    if mappings is None:
+        return {}
+    if isinstance(mappings, dict):
+        return {key: value for key, value in mappings.items() if key and value}
+    normalized: dict[str, str] = {}
+    for item in mappings:
+        if "=" not in item:
+            raise ConnectorValidationError(
+                "Seafile ingestion_api_document_id_mappings entries must use "
+                "key=document_id format."
+            )
+        key, document_id = item.split("=", 1)
+        key = key.strip()
+        document_id = document_id.strip()
+        if key and document_id:
+            normalized[key] = document_id
+    return normalized
 
 
 def _string_value(value: Any) -> str | None:
