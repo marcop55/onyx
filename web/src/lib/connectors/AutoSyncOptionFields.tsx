@@ -19,6 +19,7 @@ export const autoSyncConfigBySource: Record<
   gmail: {},
   github: {},
   slack: {},
+  seafile: {},
   salesforce: {},
   sharepoint: {},
   teams: {},
