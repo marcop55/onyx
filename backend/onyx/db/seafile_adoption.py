@@ -18,6 +18,9 @@ from onyx.db.models import (
 
 _SEAFILE_ADOPTION_STATE_KEY = "seafile_managed_adoption"
 _SEAFILE_ROLLBACK_STATE_KEY = "previous_ingestion_api_state"
+_SEAFILE_ROLLBACK_CREDENTIAL_STATE_KEY = (
+    "onyx_seafile_previous_ingestion_api_credential_json"
+)
 
 
 @dataclass(frozen=True)
@@ -109,7 +112,6 @@ def adopt_ingestion_api_cc_pair_as_managed_seafile(
         "connector_refresh_freq": connector.refresh_freq,
         "connector_prune_freq": connector.prune_freq,
         "credential_source": credential.source.value,
-        "credential_json": previous_credential_json,
         "document_ids": sorted(actual_document_ids),
     }
 
@@ -129,6 +131,7 @@ def adopt_ingestion_api_cc_pair_as_managed_seafile(
     cast(Any, credential).credential_json = {
         **previous_credential_json,
         **seafile_credential_updates,
+        _SEAFILE_ROLLBACK_CREDENTIAL_STATE_KEY: previous_credential_json,
     }
 
     db_session.commit()
@@ -178,7 +181,17 @@ def rollback_managed_seafile_adoption(
     connector.refresh_freq = state.get("connector_refresh_freq")
     connector.prune_freq = state.get("connector_prune_freq")
     credential.source = DocumentSource(_required_str(state, "credential_source"))
-    cast(Any, credential).credential_json = dict(state.get("credential_json") or {})
+    current_credential_json = (
+        credential.credential_json.get_value(apply_mask=False)
+        if credential.credential_json is not None
+        else {}
+    )
+    previous_credential_json = current_credential_json.get(
+        _SEAFILE_ROLLBACK_CREDENTIAL_STATE_KEY
+    )
+    if not isinstance(previous_credential_json, dict):
+        raise ValueError("Managed Seafile rollback credential state is missing")
+    cast(Any, credential).credential_json = dict(previous_credential_json)
 
     db_session.commit()
     return SeafileAdoptionResult(

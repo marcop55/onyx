@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -68,6 +69,16 @@ def _cleanup_document_set_and_persona(
     db_session.delete(persona)
     db_session.delete(document_set)
     db_session.commit()
+
+
+def _contains_value(value: Any, needle: str) -> bool:
+    if value == needle:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_value(item, needle) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_value(item, needle) for item in value)
+    return False
 
 
 def test_seafile_adoption_preserves_pair_and_document_associations(
@@ -184,6 +195,41 @@ def test_managed_seafile_adoption_rolls_back_without_changing_stable_ids(
             )
             .all()
         } == doc_ids
+    finally:
+        cleanup_cc_pair(db_session, pair)
+
+
+def test_managed_seafile_adoption_keeps_rollback_credentials_encrypted(
+    db_session: Session,
+) -> None:
+    pair = make_cc_pair(db_session, source=DocumentSource.INGESTION_API)
+    original_token = f"ingestion-secret-{uuid4().hex}"
+    seafile_token = f"seafile-secret-{uuid4().hex}"
+    pair.credential.credential_json = cast(Any, {"api_token": original_token})
+    db_session.commit()
+    doc_ids = _attach_docs(db_session, pair.connector_id, pair.credential_id)
+    try:
+        adopt_ingestion_api_cc_pair_as_managed_seafile(
+            db_session,
+            cc_pair_id=pair.id,
+            expected_document_ids=doc_ids,
+            seafile_connector_config={"base_url": "https://seafile.example.com"},
+            seafile_credential_updates={"seafile_api_token": seafile_token},
+        )
+
+        db_session.expire_all()
+        connector_config = pair.connector.connector_specific_config
+        assert not _contains_value(connector_config, original_token)
+        assert not _contains_value(connector_config, seafile_token)
+
+        rollback_managed_seafile_adoption(db_session, cc_pair_id=pair.id)
+
+        db_session.expire_all()
+        credential_json = pair.credential.credential_json
+        assert credential_json is not None
+        assert credential_json.get_value(apply_mask=False) == {
+            "api_token": original_token
+        }
     finally:
         cleanup_cc_pair(db_session, pair)
 
