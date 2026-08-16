@@ -566,9 +566,21 @@ def _canonical_link(base_url: str, file: SeafileRemoteFile) -> str:
 
 
 def _join_seafile_path(directory_path: str, name: str) -> str:
+    _validate_safe_seafile_path_segment(name)
     if directory_path == "/":
         return f"/{name}"
     return f"{directory_path.rstrip('/')}/{name}"
+
+
+def _validate_safe_seafile_path_segment(name: str) -> None:
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise ConnectorValidationError(
+            f"Seafile directory payload contains unsafe path segment: {name}"
+        )
+    if any(part in {".", ".."} for part in name.split("/")):
+        raise ConnectorValidationError(
+            f"Seafile directory payload contains unsafe path segment: {name}"
+        )
 
 
 def _file_extension(name: str) -> str:

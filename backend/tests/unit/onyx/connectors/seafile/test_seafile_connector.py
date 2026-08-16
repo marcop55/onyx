@@ -94,6 +94,24 @@ class FakeDuplicatePageSession(FakePaginatedSession):
         return FakeResponse([])
 
 
+class FakeUnsafePathSession(FakePaginatedSession):
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        return FakeResponse([{"type": "file", "name": "../escape.md", "id": "escape"}])
+
+
+class FakeFullPageForeverSession(FakePaginatedSession):
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        return FakeResponse(
+            [{"type": "file", "name": f"page-{len(self.requested_urls)}.md"}]
+        )
+
+
 class FakeMultiLibraryClient(FakeSeafileClient):
     def list_libraries(self) -> list[SeafileLibrary]:
         return [
@@ -142,6 +160,30 @@ class FakeSeafilePdfClient(FakeSeafileClient):
     def download_bytes(self, file: SeafileRemoteFile) -> bytes:
         self.downloaded_paths.append((file.library_id, file.path))
         return b"%PDF-1.7\x00binary"
+
+
+class FakeRichMediaClient(FakeSeafileClient):
+    def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
+        for path, content_type in [
+            ("/Designs/mockup.webp", "image/webp"),
+            ("/Designs/diagram.svg", "image/svg+xml"),
+            ("/Recordings/demo.mp3", "audio/mpeg"),
+            ("/Recordings/demo.mp4", "video/mp4"),
+        ]:
+            yield SeafileRemoteFile(
+                library_id=library.id,
+                library_name=library.name,
+                path=path,
+                id=path.rsplit("/", 1)[-1],
+                name=path.rsplit("/", 1)[-1],
+                size=256,
+                mtime=datetime(2026, 8, 14, 12, 30, tzinfo=timezone.utc),
+                content_type=content_type,
+            )
+
+    def download_bytes(self, file: SeafileRemoteFile) -> bytes:
+        self.downloaded_paths.append((file.library_id, file.path))
+        return b"\x00\x01\x02not utf8\xff"
 
 
 @pytest.fixture(autouse=True)
@@ -353,6 +395,38 @@ def test_seafile_api_client_fails_closed_on_duplicate_file_identity(
     assert "Duplicate Seafile file identity" in str(exc_info.value)
 
 
+def test_seafile_api_client_fails_closed_on_unsafe_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        seafile_connector_module.requests, "Session", lambda: FakeUnsafePathSession()
+    )
+    client = SeafileApiClient("https://seafile.example.com", "token")
+
+    with pytest.raises(ConnectorValidationError) as exc_info:
+        list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert "unsafe" in str(exc_info.value)
+
+
+def test_seafile_api_client_fails_closed_on_pagination_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        seafile_connector_module.requests,
+        "Session",
+        lambda: FakeFullPageForeverSession(),
+    )
+    client = SeafileApiClient(
+        "https://seafile.example.com", "token", page_size=1, max_pages_per_directory=2
+    )
+
+    with pytest.raises(ConnectorValidationError) as exc_info:
+        list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert "pagination exceeded" in str(exc_info.value)
+
+
 def test_seafile_connector_uses_rich_extraction_for_binary_formats(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,6 +467,65 @@ def test_seafile_connector_uses_rich_extraction_for_binary_formats(
     assert isinstance(documents[0].sections[0], TextSection)
     assert documents[0].sections[0].text == "rich pdf text"
     assert documents[0].metadata["Author"] == "OneQode"
+
+
+def test_seafile_connector_safely_handles_rich_media_without_utf8_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[bytes, str, str | None]] = []
+
+    def fake_extract_text_and_images(
+        file: Any,
+        file_name: str,
+        content_type: str | None = None,
+        **_: Any,
+    ) -> Any:
+        raw = file.read()
+        calls.append((raw, file_name, content_type))
+        if file_name == "mockup.webp":
+            return ExtractionResult(
+                text_content="ocr text from webp",
+                embedded_images=[],
+                metadata={},
+            )
+        return ExtractionResult(text_content="", embedded_images=[], metadata={})
+
+    monkeypatch.setattr(
+        seafile_connector_module,
+        "extract_text_and_images",
+        fake_extract_text_and_images,
+    )
+
+    client = FakeRichMediaClient()
+    connector = SeafileConnector(
+        base_url="https://seafile.example.com",
+        library_ids=["lib-1"],
+        indexable_extensions=[".webp", ".svg", ".mp3", ".mp4"],
+        ingestion_api_document_id_mappings={
+            "mockup.webp": "stable-webp",
+            "diagram.svg": "stable-svg",
+            "demo.mp3": "stable-audio",
+            "demo.mp4": "stable-video",
+        },
+        client=client,
+    )
+
+    items = [item for batch in connector.load_from_state() for item in batch]
+    documents = [item for item in items if isinstance(item, Document)]
+    failures = [item for item in items if isinstance(item, ConnectorFailure)]
+
+    assert [document.id for document in documents] == ["stable-webp"]
+    assert documents[0].sections[0].text == "ocr text from webp"
+    assert len(failures) == 3
+    assert all(
+        "no indexable content" in failure.failure_message for failure in failures
+    )
+    assert [call[1:] for call in calls] == [
+        ("mockup.webp", "image/webp"),
+        ("diagram.svg", "image/svg+xml"),
+        ("demo.mp3", "audio/mpeg"),
+        ("demo.mp4", "video/mp4"),
+    ]
 
 
 def test_seafile_connector_validates_exact_library_ids_and_rejects_missing_ids() -> (
