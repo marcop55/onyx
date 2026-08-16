@@ -122,12 +122,12 @@ class SeafileApiClient:
 
     def iter_files(self, library: SeafileLibrary) -> Iterator[SeafileRemoteFile]:
         seen_directory_paths: set[str] = set()
-        seen_file_identities: set[str] = set()
+        seen_file_paths: set[str] = set()
         yield from self._iter_files_at_path(
             library,
             "/",
             seen_directory_paths=seen_directory_paths,
-            seen_file_identities=seen_file_identities,
+            seen_file_paths=seen_file_paths,
         )
 
     def download_bytes(self, file: SeafileRemoteFile) -> bytes:
@@ -147,7 +147,7 @@ class SeafileApiClient:
         directory_path: str,
         *,
         seen_directory_paths: set[str],
-        seen_file_identities: set[str],
+        seen_file_paths: set[str],
     ) -> Iterator[SeafileRemoteFile]:
         if directory_path in seen_directory_paths:
             raise ConnectorValidationError(
@@ -191,16 +191,16 @@ class SeafileApiClient:
                         library,
                         child_path,
                         seen_directory_paths=seen_directory_paths,
-                        seen_file_identities=seen_file_identities,
+                        seen_file_paths=seen_file_paths,
                     )
                 elif item_type == "file":
                     file = self._file_from_payload(library, child_path, item)
-                    identity = f"{file.library_id}:{file.id}"
-                    if identity in seen_file_identities:
+                    path_identity = f"{file.library_id}:{file.path}"
+                    if path_identity in seen_file_paths:
                         raise ConnectorValidationError(
-                            f"Duplicate Seafile file identity encountered: {identity}"
+                            f"Duplicate Seafile file path encountered: {path_identity}"
                         )
-                    seen_file_identities.add(identity)
+                    seen_file_paths.add(path_identity)
                     yield file
 
             if page_item_count < self._page_size:
@@ -507,13 +507,13 @@ def _document_id(
             raise ConnectorValidationError(
                 "Seafile Ingestion API adoption requires base_url to resolve document IDs"
             )
-        document_id = _adopted_document_id(
-            base_url, file, adoption.document_id_mappings
-        )
+        document_id = _adopted_document_id(file, adoption.document_id_mappings)
         if document_id is None:
             raise ConnectorValidationError(
                 "Seafile Ingestion API adoption is enabled, but no existing "
-                f"document_id mapping was found for {file.library_id}:{file.path}. "
+                "document_id mapping was found; no exact path-scoped "
+                "document_id mapping exists for "
+                f"{file.library_id}:{file.path}. "
                 "Refusing to create a second Seafile document identity before cutover."
             )
         return document_id
@@ -521,23 +521,11 @@ def _document_id(
 
 
 def _adopted_document_id(
-    base_url: str,
-    file: SeafileRemoteFile,
-    mappings: Mapping[str, str] | None,
+    file: SeafileRemoteFile, mappings: Mapping[str, str] | None
 ) -> str | None:
     if not mappings:
         return None
-    candidates = (
-        f"{file.library_id}:{file.path}",
-        _canonical_link(base_url, file),
-        file.path,
-        file.id,
-    )
-    for candidate in candidates:
-        document_id = mappings.get(candidate)
-        if document_id:
-            return document_id
-    return None
+    return mappings.get(f"{file.library_id}:{file.path}")
 
 
 @dataclass
@@ -613,7 +601,9 @@ def _normalize_document_id_mappings(
     if mappings is None:
         return {}
     if isinstance(mappings, dict):
-        return {key: value for key, value in mappings.items() if key and value}
+        normalized = {key: value for key, value in mappings.items() if key and value}
+        _validate_document_id_mapping_values(normalized)
+        return normalized
     normalized: dict[str, str] = {}
     for item in mappings:
         if "=" not in item:
@@ -625,8 +615,30 @@ def _normalize_document_id_mappings(
         key = key.strip()
         document_id = document_id.strip()
         if key and document_id:
+            if key in normalized and normalized[key] != document_id:
+                raise ConnectorValidationError(
+                    f"Seafile ingestion_api_document_id_mappings contains an "
+                    f"ambiguous document_id mapping key: {key}"
+                )
             normalized[key] = document_id
+    _validate_document_id_mapping_values(normalized)
     return normalized
+
+
+def _validate_document_id_mapping_values(mappings: Mapping[str, str]) -> None:
+    keys_by_document_id: dict[str, list[str]] = {}
+    for key, document_id in mappings.items():
+        keys_by_document_id.setdefault(document_id, []).append(key)
+    ambiguous_document_ids = sorted(
+        document_id
+        for document_id, keys in keys_by_document_id.items()
+        if len(keys) > 1
+    )
+    if ambiguous_document_ids:
+        raise ConnectorValidationError(
+            "Seafile ingestion_api_document_id_mappings contains an ambiguous "
+            "document_id mapping value: " + ", ".join(ambiguous_document_ids)
+        )
 
 
 def _string_value(value: Any) -> str | None:

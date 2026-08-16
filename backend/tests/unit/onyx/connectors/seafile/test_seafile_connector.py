@@ -94,6 +94,57 @@ class FakeDuplicatePageSession(FakePaginatedSession):
         return FakeResponse([])
 
 
+class FakeDuplicatePathSession(FakePaginatedSession):
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        if "start=0" in url:
+            return FakeResponse([{"type": "file", "name": "a.md", "id": "first-id"}])
+        if "start=1" in url:
+            return FakeResponse([{"type": "file", "name": "a.md", "id": "second-id"}])
+        return FakeResponse([])
+
+
+class FakeAcceptedInventorySession(FakePaginatedSession):
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        if "p=/&start=0&limit=100" in url:
+            return FakeResponse(
+                [
+                    {"type": "dir", "name": "Admitted", "id": "dir-admitted"},
+                    {"type": "dir", "name": "Archive", "id": "dir-archive"},
+                ]
+            )
+        if "p=/Admitted&" in url:
+            start = _start_from_url(url)
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "name": f"doc-{idx:03}.pdf",
+                        "id": f"active-{idx:03}",
+                    }
+                    for idx in range(start, min(start + 100, 278))
+                ]
+            )
+        if "p=/Archive&" in url:
+            start = _start_from_url(url)
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "name": f"rejected-{idx:03}.pdf",
+                        "id": f"archived-{idx:03}",
+                    }
+                    for idx in range(start, min(start + 100, 204))
+                ]
+            )
+        return FakeResponse([])
+
+
 class FakeUnsafePathSession(FakePaginatedSession):
     def request(self, method: str, url: str, timeout: int) -> FakeResponse:
         self.requested_urls.append(url)
@@ -118,6 +169,11 @@ class FakeMultiLibraryClient(FakeSeafileClient):
             SeafileLibrary(id="lib-1", name="OneQode"),
             SeafileLibrary(id="lib-2", name="OneQode"),
         ]
+
+
+class FakeMultiLibrarySamePathClient(FakeMultiLibraryClient):
+    def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
+        yield seafile_file(library)
 
 
 class FakeSeafileImageClient(FakeSeafileClient):
@@ -226,6 +282,11 @@ def seafile_file(library: SeafileLibrary) -> SeafileRemoteFile:
     )
 
 
+def _start_from_url(url: str) -> int:
+    marker = "start="
+    return int(url.split(marker, 1)[1].split("&", 1)[0])
+
+
 def _collect_documents(connector: SeafileConnector) -> list[Document]:
     return [
         item
@@ -296,6 +357,79 @@ def test_seafile_connector_adopts_existing_ingestion_api_identity_without_dual_i
         "error_count": "0",
         "adopted_ingestion_api_count": "1",
     }
+
+
+def test_seafile_connector_requires_path_scoped_existing_document_mapping() -> None:
+    connector = SeafileConnector(
+        base_url="https://seafile.example.com/",
+        library_ids=["lib-1"],
+        ingestion_api_document_id_mappings={"file-1": "oneqode:stable:launch-plan"},
+        batch_size=10,
+        client=FakeSeafileClient(),
+    )
+
+    documents = _collect_documents(connector)
+    failures = _collect_failures(connector)
+
+    assert documents == []
+    assert len(failures) == 1
+    assert "no exact path-scoped document_id mapping" in failures[0].failure_message
+
+
+def test_seafile_connector_requires_library_scoped_path_mapping() -> None:
+    client = FakeMultiLibrarySamePathClient()
+    connector = SeafileConnector(
+        base_url="https://seafile.example.com/",
+        library_ids=["lib-1", "lib-2"],
+        ingestion_api_document_id_mappings={
+            "lib-1:/Strategy/Launch Plan.md": "stable-lib-1",
+            "/Strategy/Launch Plan.md": "path-only-fallback",
+        },
+        batch_size=10,
+        client=client,
+    )
+
+    items = [item for batch in connector.load_from_state() for item in batch]
+    documents = [item for item in items if isinstance(item, Document)]
+    failures = [item for item in items if isinstance(item, ConnectorFailure)]
+
+    assert [document.id for document in documents] == ["stable-lib-1"]
+    assert client.downloaded_paths == [("lib-1", "/Strategy/Launch Plan.md")]
+    assert len(failures) == 1
+    assert "lib-2:/Strategy/Launch Plan.md" in failures[0].failure_message
+    assert "no exact path-scoped document_id mapping" in failures[0].failure_message
+
+
+def test_seafile_connector_rejects_ambiguous_document_mapping_keys() -> None:
+    with pytest.raises(ConnectorValidationError) as exc_info:
+        SeafileConnector(
+            base_url="https://seafile.example.com/",
+            library_ids=["lib-1"],
+            ingestion_api_document_id_mappings=[
+                "lib-1:/Strategy/Launch Plan.md=stable-first",
+                "lib-1:/Strategy/Launch Plan.md=stable-second",
+            ],
+            batch_size=10,
+            client=FakeSeafileClient(),
+        )
+
+    assert "ambiguous document_id mapping key" in str(exc_info.value)
+
+
+def test_seafile_connector_rejects_ambiguous_document_mapping_values() -> None:
+    with pytest.raises(ConnectorValidationError) as exc_info:
+        SeafileConnector(
+            base_url="https://seafile.example.com/",
+            library_ids=["lib-1"],
+            ingestion_api_document_id_mappings={
+                "lib-1:/Strategy/Launch Plan.md": "stable-duplicate",
+                "lib-1:/Strategy/Other Plan.md": "stable-duplicate",
+            },
+            batch_size=10,
+            client=FakeSeafileClient(),
+        )
+
+    assert "ambiguous document_id mapping value" in str(exc_info.value)
 
 
 def test_seafile_connector_refuses_to_create_second_identity_before_cutover() -> None:
@@ -379,7 +513,7 @@ def test_seafile_api_client_exhaustively_paginates_legacy_dirents_without_v21(
     assert any("start=2&limit=2" in url for url in fake_session.requested_urls)
 
 
-def test_seafile_api_client_fails_closed_on_duplicate_file_identity(
+def test_seafile_api_client_scopes_duplicate_backend_file_ids_by_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -389,10 +523,52 @@ def test_seafile_api_client_fails_closed_on_duplicate_file_identity(
         "https://seafile.example.com", "token", page_size=1, max_pages_per_directory=4
     )
 
+    files = list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert [(file.path, file.id) for file in files] == [
+        ("/a.md", "same-id"),
+        ("/a-copy.md", "same-id"),
+    ]
+
+
+def test_seafile_api_client_fails_closed_on_duplicate_file_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        seafile_connector_module.requests, "Session", lambda: FakeDuplicatePathSession()
+    )
+    client = SeafileApiClient(
+        "https://seafile.example.com", "token", page_size=1, max_pages_per_directory=4
+    )
+
     with pytest.raises(ConnectorValidationError) as exc_info:
         list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
 
-    assert "Duplicate Seafile file identity" in str(exc_info.value)
+    assert "Duplicate Seafile file path" in str(exc_info.value)
+
+
+def test_seafile_api_client_exhaustively_traverses_accepted_482_file_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = FakeAcceptedInventorySession()
+    monkeypatch.setattr(
+        seafile_connector_module.requests, "Session", lambda: fake_session
+    )
+    client = SeafileApiClient(
+        "https://seafile.example.com", "token", page_size=100, max_pages_per_directory=5
+    )
+
+    files = list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert len(files) == 482
+    assert sum(1 for file in files if file.path.startswith("/Admitted/")) == 278
+    assert sum(1 for file in files if file.path.startswith("/Archive/")) == 204
+    assert any(
+        "p=/Admitted&start=200&limit=100" in url for url in fake_session.requested_urls
+    )
+    assert any(
+        "p=/Archive&start=200&limit=100" in url for url in fake_session.requested_urls
+    )
 
 
 def test_seafile_api_client_fails_closed_on_unsafe_paths(
@@ -456,7 +632,7 @@ def test_seafile_connector_uses_rich_extraction_for_binary_formats(
     connector = SeafileConnector(
         base_url="https://seafile.example.com",
         library_ids=["lib-1"],
-        ingestion_api_document_id_mappings={"file-pdf": "stable-pdf"},
+        ingestion_api_document_id_mappings={"lib-1:/Reports/board.pdf": "stable-pdf"},
         client=client,
     )
 
@@ -502,10 +678,10 @@ def test_seafile_connector_safely_handles_rich_media_without_utf8_decoding(
         library_ids=["lib-1"],
         indexable_extensions=[".webp", ".svg", ".mp3", ".mp4"],
         ingestion_api_document_id_mappings={
-            "mockup.webp": "stable-webp",
-            "diagram.svg": "stable-svg",
-            "demo.mp3": "stable-audio",
-            "demo.mp4": "stable-video",
+            "lib-1:/Designs/mockup.webp": "stable-webp",
+            "lib-1:/Designs/diagram.svg": "stable-svg",
+            "lib-1:/Recordings/demo.mp3": "stable-audio",
+            "lib-1:/Recordings/demo.mp4": "stable-video",
         },
         client=client,
     )
