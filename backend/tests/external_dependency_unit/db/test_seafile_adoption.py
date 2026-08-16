@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, cast
 from uuid import uuid4
 
+import pytest
 from sqlalchemy.orm import Session
 
 from onyx.configs.constants import DocumentSource
@@ -81,6 +82,31 @@ def _contains_value(value: Any, needle: str) -> bool:
     return False
 
 
+def _add_doc_association(
+    db_session: Session, connector_id: int, credential_id: int, doc_id: str
+) -> None:
+    db_session.add(
+        DBDocument(
+            id=doc_id,
+            from_ingestion_api=True,
+            boost=0,
+            hidden=False,
+            semantic_id=f"semantic-{doc_id}",
+            link=f"https://seafile.example.com/lib/lib-1/file/{doc_id}.pdf",
+            kg_stage=KGStage.NOT_STARTED,
+        )
+    )
+    db_session.add(
+        DocumentByConnectorCredentialPair(
+            id=doc_id,
+            connector_id=connector_id,
+            credential_id=credential_id,
+            has_been_indexed=True,
+        )
+    )
+    db_session.commit()
+
+
 def test_seafile_adoption_preserves_pair_and_document_associations(
     db_session: Session,
 ) -> None:
@@ -132,6 +158,49 @@ def test_seafile_adoption_preserves_pair_and_document_associations(
             seafile_credential_updates={"seafile_api_token": "unused"},
         )
         assert again.was_already_adopted is True
+    finally:
+        cleanup_cc_pair(db_session, pair)
+
+
+@pytest.mark.parametrize("live_change", ["missing", "extra", "changed"])
+def test_already_adopted_seafile_rerun_validates_live_associations(
+    db_session: Session, live_change: str
+) -> None:
+    pair = make_cc_pair(db_session, source=DocumentSource.INGESTION_API)
+    doc_ids = _attach_docs(db_session, pair.connector_id, pair.credential_id)
+    try:
+        adopt_ingestion_api_cc_pair_as_managed_seafile(
+            db_session,
+            cc_pair_id=pair.id,
+            expected_document_ids=doc_ids,
+            seafile_connector_config={"base_url": "https://seafile.example.com"},
+            seafile_credential_updates={"seafile_api_token": "token"},
+        )
+
+        removed_doc_id = sorted(doc_ids)[0]
+        if live_change in {"missing", "changed"}:
+            db_session.query(DocumentByConnectorCredentialPair).filter(
+                DocumentByConnectorCredentialPair.connector_id == pair.connector_id,
+                DocumentByConnectorCredentialPair.credential_id == pair.credential_id,
+                DocumentByConnectorCredentialPair.id == removed_doc_id,
+            ).delete(synchronize_session="fetch")
+        if live_change in {"extra", "changed"}:
+            _add_doc_association(
+                db_session,
+                pair.connector_id,
+                pair.credential_id,
+                f"seafile-adopt-test-{uuid4().hex}-extra",
+            )
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="live document associations changed"):
+            adopt_ingestion_api_cc_pair_as_managed_seafile(
+                db_session,
+                cc_pair_id=pair.id,
+                expected_document_ids=doc_ids,
+                seafile_connector_config={},
+                seafile_credential_updates={"seafile_api_token": "unused"},
+            )
     finally:
         cleanup_cc_pair(db_session, pair)
 
@@ -195,6 +264,39 @@ def test_managed_seafile_adoption_rolls_back_without_changing_stable_ids(
             )
             .all()
         } == doc_ids
+
+        second_rollback = rollback_managed_seafile_adoption(
+            db_session, cc_pair_id=pair.id
+        )
+        db_session.refresh(pair)
+        assert second_rollback.cc_pair_id == pair.id
+        assert pair.connector.source is DocumentSource.INGESTION_API
+        assert pair.credential.source is DocumentSource.INGESTION_API
+    finally:
+        cleanup_cc_pair(db_session, pair)
+
+
+def test_completed_seafile_rollback_retry_fails_closed_on_changed_state(
+    db_session: Session,
+) -> None:
+    pair = make_cc_pair(db_session, source=DocumentSource.INGESTION_API)
+    doc_ids = _attach_docs(db_session, pair.connector_id, pair.credential_id)
+    try:
+        original_name = pair.connector.name
+        adopt_ingestion_api_cc_pair_as_managed_seafile(
+            db_session,
+            cc_pair_id=pair.id,
+            expected_document_ids=doc_ids,
+            seafile_connector_config={"base_url": "https://seafile.example.com"},
+            seafile_credential_updates={"seafile_api_token": "token"},
+        )
+        rollback_managed_seafile_adoption(db_session, cc_pair_id=pair.id)
+
+        pair.connector.name = f"{original_name}-changed"
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="rollback connector name changed"):
+            rollback_managed_seafile_adoption(db_session, cc_pair_id=pair.id)
     finally:
         cleanup_cc_pair(db_session, pair)
 

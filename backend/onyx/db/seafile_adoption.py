@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -70,7 +72,7 @@ def adopt_ingestion_api_cc_pair_as_managed_seafile(
     credential = cc_pair.credential
     if _is_adopted(connector, credential):
         _validate_existing_adoption(
-            cc_pair, connector, credential, expected_document_ids
+            db_session, cc_pair, connector, credential, expected_document_ids
         )
         return SeafileAdoptionResult(
             cc_pair_id=cc_pair.id,
@@ -112,6 +114,7 @@ def adopt_ingestion_api_cc_pair_as_managed_seafile(
         "connector_refresh_freq": connector.refresh_freq,
         "connector_prune_freq": connector.prune_freq,
         "credential_source": credential.source.value,
+        "credential_json_sha256": _credential_json_sha256(previous_credential_json),
         "document_ids": sorted(actual_document_ids),
     }
 
@@ -171,13 +174,25 @@ def rollback_managed_seafile_adoption(
     actual_document_ids = _document_ids_for_pair(db_session, cc_pair)
     if actual_document_ids != expected_document_ids:
         raise ValueError("Managed Seafile rollback inventory mismatch")
+    if state.get("rollback_completed") is True:
+        _validate_completed_rollback(cc_pair, connector, credential, state)
+        return SeafileAdoptionResult(
+            cc_pair_id=cc_pair.id,
+            connector_id=connector.id,
+            credential_id=credential.id,
+            adopted_document_count=len(actual_document_ids),
+            was_already_adopted=False,
+        )
 
     connector.name = _required_str(state, "connector_name")
     connector.source = DocumentSource(_required_str(state, "connector_source"))
     connector.input_type = InputType(_required_str(state, "connector_input_type"))
-    connector.connector_specific_config = dict(
-        state.get("connector_specific_config") or {}
-    )
+    restored_connector_config = dict(state.get("connector_specific_config") or {})
+    restored_connector_config[_SEAFILE_ROLLBACK_STATE_KEY] = {
+        **state,
+        "rollback_completed": True,
+    }
+    connector.connector_specific_config = restored_connector_config
     connector.refresh_freq = state.get("connector_refresh_freq")
     connector.prune_freq = state.get("connector_prune_freq")
     credential.source = DocumentSource(_required_str(state, "credential_source"))
@@ -213,6 +228,7 @@ def _is_adopted(connector: Connector, credential: Credential) -> bool:
 
 
 def _validate_existing_adoption(
+    db_session: Session,
     cc_pair: ConnectorCredentialPair,
     connector: Connector,
     credential: Credential,
@@ -229,6 +245,46 @@ def _validate_existing_adoption(
         raise ValueError("Managed Seafile pair identity changed")
     if set(_string_list(adoption_state.get("document_ids"))) != expected_document_ids:
         raise ValueError("Managed Seafile adoption inventory changed")
+    actual_document_ids = _document_ids_for_pair(db_session, cc_pair)
+    if actual_document_ids != expected_document_ids:
+        raise ValueError("Managed Seafile live document associations changed")
+
+
+def _validate_completed_rollback(
+    cc_pair: ConnectorCredentialPair,
+    connector: Connector,
+    credential: Credential,
+    state: dict[str, Any],
+) -> None:
+    if credential.id != cc_pair.credential_id or connector.id != cc_pair.connector_id:
+        raise ValueError("Managed Seafile rollback pair identity changed")
+    if connector.name != _required_str(state, "connector_name"):
+        raise ValueError("Managed Seafile rollback connector name changed")
+    if connector.source != DocumentSource(_required_str(state, "connector_source")):
+        raise ValueError("Managed Seafile rollback connector source changed")
+    if connector.input_type != InputType(_required_str(state, "connector_input_type")):
+        raise ValueError("Managed Seafile rollback connector input type changed")
+    if connector.refresh_freq != state.get("connector_refresh_freq"):
+        raise ValueError("Managed Seafile rollback refresh frequency changed")
+    if connector.prune_freq != state.get("connector_prune_freq"):
+        raise ValueError("Managed Seafile rollback prune frequency changed")
+    if credential.source != DocumentSource(_required_str(state, "credential_source")):
+        raise ValueError("Managed Seafile rollback credential source changed")
+
+    connector_config = dict(connector.connector_specific_config or {})
+    connector_config.pop(_SEAFILE_ROLLBACK_STATE_KEY, None)
+    if connector_config != dict(state.get("connector_specific_config") or {}):
+        raise ValueError("Managed Seafile rollback connector config changed")
+
+    credential_json = (
+        credential.credential_json.get_value(apply_mask=False)
+        if credential.credential_json is not None
+        else {}
+    )
+    if _credential_json_sha256(credential_json) != _required_str(
+        state, "credential_json_sha256"
+    ):
+        raise ValueError("Managed Seafile rollback credential state changed")
 
 
 def _document_ids_for_pair(
@@ -263,6 +319,11 @@ def _required_str(data: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"Managed Seafile rollback field is invalid: {key}")
     return value
+
+
+def _credential_json_sha256(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _string_list(value: Any) -> list[str]:
