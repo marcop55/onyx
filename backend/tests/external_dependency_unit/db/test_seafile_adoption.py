@@ -122,7 +122,8 @@ def test_seafile_adoption_preserves_pair_and_document_associations(
                 "library_ids": ["lib-1"],
                 "excluded_paths": ["/Archive/*", "/Inbox/*"],
                 "ingestion_api_document_id_mappings": {
-                    f"file-{idx}": doc_id for idx, doc_id in enumerate(sorted(doc_ids))
+                    f"lib-1:/Admitted/doc-{idx:03}.pdf": doc_id
+                    for idx, doc_id in enumerate(sorted(doc_ids))
                 },
             },
             seafile_credential_updates={"seafile_api_token": "token-redacted-in-api"},
