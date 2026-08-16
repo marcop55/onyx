@@ -237,7 +237,7 @@ class FakeLiveLegacyRecursiveInventorySession(FakePaginatedSession):
                         "name": f"doc-{idx:03}.pdf",
                         "id": f"active-{idx:03}",
                     }
-                    for idx in range(278)
+                    for idx in range(185)
                 ]
                 + [
                     {
@@ -246,7 +246,7 @@ class FakeLiveLegacyRecursiveInventorySession(FakePaginatedSession):
                         "name": f"rejected-{idx:03}.pdf",
                         "id": f"archived-{idx:03}",
                     }
-                    for idx in range(204)
+                    for idx in range(208)
                 ]
             )
         if "p=/&start=0&limit=100" in url:
@@ -265,7 +265,7 @@ class FakeLiveLegacyRecursiveInventorySession(FakePaginatedSession):
                         "name": f"doc-{idx:03}.pdf",
                         "id": f"active-{idx:03}",
                     }
-                    for idx in range(start, min(start + 100, 190))
+                    for idx in range(start, min(start + 100, 278))
                 ]
             )
         if "p=/Archive&" in url:
@@ -277,10 +277,30 @@ class FakeLiveLegacyRecursiveInventorySession(FakePaginatedSession):
                         "name": f"rejected-{idx:03}.pdf",
                         "id": f"archived-{idx:03}",
                     }
-                    for idx in range(start, min(start + 100, 203))
+                    for idx in range(start, min(start + 100, 204))
                 ]
             )
         return FakeResponse([])
+
+
+class FakePartialMappingClient(FakeSeafileClient):
+    def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
+        yield SeafileRemoteFile(
+            library_id=library.id,
+            library_name=library.name,
+            path="/Admitted/doc-001.pdf",
+            id="duplicate-backend-id",
+            name="doc-001.pdf",
+            content_type="application/pdf",
+        )
+        yield SeafileRemoteFile(
+            library_id=library.id,
+            library_name=library.name,
+            path="/Admitted/doc-002.pdf",
+            id="duplicate-backend-id",
+            name="doc-002.pdf",
+            content_type="application/pdf",
+        )
 
 
 class FakeUnsafePathSession(FakePaginatedSession):
@@ -600,6 +620,30 @@ def test_seafile_connector_refuses_to_create_second_identity_before_cutover() ->
     assert connector.health_snapshot().error_count == 1
 
 
+def test_seafile_connector_requires_complete_mapping_before_downloading() -> None:
+    client = FakePartialMappingClient()
+    connector = SeafileConnector(
+        base_url="https://seafile.example.com/",
+        library_ids=["lib-1"],
+        ingestion_api_document_id_mappings={
+            "lib-1:/Admitted/doc-001.pdf": "canonical-doc-001"
+        },
+        batch_size=10,
+        client=client,
+    )
+
+    documents = _collect_documents(connector)
+    failures = _collect_failures(connector)
+
+    assert documents == []
+    assert client.downloaded_paths == []
+    assert len(failures) == 2
+    assert all(
+        "not covered by one-to-one document_id mappings" in failure.failure_message
+        for failure in failures
+    )
+
+
 def test_seafile_connector_preserves_revision_link_exclusion_and_skip_counts() -> None:
     client = FakeSeafileClient()
     connector = SeafileConnector(
@@ -715,7 +759,7 @@ def test_seafile_api_client_exhaustively_traverses_accepted_482_file_inventory(
     assert not any("start=" in url for url in fake_session.requested_urls)
 
 
-def test_seafile_api_client_uses_legacy_recursive_contract_for_live_inventory(
+def test_seafile_api_client_falls_back_when_live_recursive_contract_is_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_session = FakeLiveLegacyRecursiveInventorySession()
@@ -732,7 +776,7 @@ def test_seafile_api_client_uses_legacy_recursive_contract_for_live_inventory(
     assert sum(1 for file in files if file.path.startswith("/Admitted/")) == 278
     assert sum(1 for file in files if file.path.startswith("/Archive/")) == 204
     assert any("p=/&recursive=1" in url for url in fake_session.requested_urls)
-    assert not any("start=" in url for url in fake_session.requested_urls)
+    assert any("start=" in url for url in fake_session.requested_urls)
 
 
 def test_seafile_api_client_fails_closed_on_unsafe_paths(

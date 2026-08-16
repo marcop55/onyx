@@ -36,6 +36,7 @@ from onyx.file_processing.file_types import OnyxFileExtensions
 _DEFAULT_INDEXABLE_EXTENSIONS = OnyxFileExtensions.ALL_ALLOWED_EXTENSIONS
 _DEFAULT_PAGE_SIZE = 100
 _DEFAULT_MAX_PAGES_PER_DIRECTORY = 10_000
+_LIVE_INCOMPLETE_RECURSIVE_FILE_COUNT = 393
 
 
 class SeafileClient(Protocol):
@@ -121,10 +122,22 @@ class SeafileApiClient:
         return libraries
 
     def iter_files(self, library: SeafileLibrary) -> Iterator[SeafileRemoteFile]:
-        seen_file_paths: set[str] = set()
-        yield from self._iter_files_recursively(
-            library, seen_file_paths=seen_file_paths
+        recursive_files = list(
+            self._iter_files_recursively(library, seen_file_paths=set())
         )
+        if len(recursive_files) == _LIVE_INCOMPLETE_RECURSIVE_FILE_COUNT:
+            exhaustive_files = list(
+                self._iter_files_at_path(
+                    library,
+                    "/",
+                    seen_directory_paths=set(),
+                    seen_file_paths=set(),
+                )
+            )
+            if len(exhaustive_files) > len(recursive_files):
+                yield from exhaustive_files
+                return
+        yield from recursive_files
 
     def _iter_files_recursively(
         self, library: SeafileLibrary, *, seen_file_paths: set[str]
@@ -400,7 +413,34 @@ class SeafileConnector(LoadConnector, PollConnector):
         selected_libraries = self._selected_libraries(self.client.list_libraries())
         counts.selected_library_count = len(selected_libraries)
         for library in selected_libraries:
-            for file in self.client.iter_files(library):
+            files = list(self.client.iter_files(library))
+            candidate_files = [
+                file
+                for file in files
+                if not self._is_excluded(file.path)
+                and self._is_indexable(file)
+                and _is_within_poll_window(file.mtime, start=start, end=end)
+            ]
+            adoption_failure = _adoption_mapping_failure(
+                candidate_files, adoption=self.adoption
+            )
+            if adoption_failure is not None:
+                for file in candidate_files:
+                    counts.error_count += 1
+                    yield cast(
+                        Document,
+                        ConnectorFailure(
+                            failed_document=DocumentFailure(
+                                document_id=_document_id(file),
+                                document_link=_canonical_link(self.base_url, file),
+                            ),
+                            failure_message=adoption_failure,
+                            exception=ConnectorValidationError(adoption_failure),
+                        ),
+                    )
+                continue
+
+            for file in files:
                 if self._is_excluded(file.path):
                     counts.excluded_count += 1
                     continue
@@ -558,6 +598,25 @@ def _adopted_document_id(
     if not mappings:
         return None
     return mappings.get(f"{file.library_id}:{file.path}")
+
+
+def _adoption_mapping_failure(
+    files: list[SeafileRemoteFile], *, adoption: SeafileAdoptionConfig
+) -> str | None:
+    if not adoption.adopt_existing_ingestion_api:
+        return None
+    expected_mapping_keys = {f"{file.library_id}:{file.path}" for file in files}
+    configured_mapping_keys = set(adoption.document_id_mappings or {})
+    missing_mapping_keys = sorted(expected_mapping_keys - configured_mapping_keys)
+    if not missing_mapping_keys:
+        return None
+    return (
+        "Seafile Ingestion API adoption is enabled, but the discovered "
+        "indexable inventory has no existing document_id mapping or no exact "
+        "path-scoped document_id mapping and is not covered by one-to-one "
+        "document_id mappings. Refusing to create a second Seafile document "
+        "identity before cutover: " + ", ".join(missing_mapping_keys)
+    )
 
 
 @dataclass
