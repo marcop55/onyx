@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,17 +27,15 @@ from onyx.connectors.models import (
     TextSection,
 )
 from onyx.connectors.seafile.models import SeafileLibrary, SeafileRemoteFile
+from onyx.file_processing.extract_file_text import (
+    ExtractionResult,
+    extract_text_and_images,
+)
+from onyx.file_processing.file_types import OnyxFileExtensions
 
-_DEFAULT_INDEXABLE_EXTENSIONS = {
-    ".csv",
-    ".htm",
-    ".html",
-    ".md",
-    ".rst",
-    ".text",
-    ".tsv",
-    ".txt",
-}
+_DEFAULT_INDEXABLE_EXTENSIONS = OnyxFileExtensions.ALL_ALLOWED_EXTENSIONS
+_DEFAULT_PAGE_SIZE = 100
+_DEFAULT_MAX_PAGES_PER_DIRECTORY = 10_000
 
 
 class SeafileClient(Protocol):
@@ -46,7 +45,7 @@ class SeafileClient(Protocol):
 
     def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]: ...
 
-    def download_text(self, file: SeafileRemoteFile) -> str: ...
+    def download_bytes(self, file: SeafileRemoteFile) -> bytes: ...
 
 
 @dataclass(frozen=True)
@@ -76,9 +75,25 @@ class SeafileHealthSnapshot:
 
 
 class SeafileApiClient:
-    def __init__(self, base_url: str, token: str, *, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout: int = 30,
+        page_size: int = _DEFAULT_PAGE_SIZE,
+        max_pages_per_directory: int = _DEFAULT_MAX_PAGES_PER_DIRECTORY,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self._timeout = timeout
+        if page_size <= 0:
+            raise ConnectorValidationError("Seafile page_size must be positive")
+        if max_pages_per_directory <= 0:
+            raise ConnectorValidationError(
+                "Seafile max_pages_per_directory must be positive"
+            )
+        self._page_size = page_size
+        self._max_pages_per_directory = max_pages_per_directory
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Token {token}"})
 
@@ -106,9 +121,16 @@ class SeafileApiClient:
         return libraries
 
     def iter_files(self, library: SeafileLibrary) -> Iterator[SeafileRemoteFile]:
-        yield from self._iter_files_at_path(library, "/")
+        seen_directory_paths: set[str] = set()
+        seen_file_identities: set[str] = set()
+        yield from self._iter_files_at_path(
+            library,
+            "/",
+            seen_directory_paths=seen_directory_paths,
+            seen_file_identities=seen_file_identities,
+        )
 
-    def download_text(self, file: SeafileRemoteFile) -> str:
+    def download_bytes(self, file: SeafileRemoteFile) -> bytes:
         download_url = file.download_url or self._get_download_url(file)
         try:
             response = self._session.get(download_url, timeout=self._timeout)
@@ -117,29 +139,73 @@ class SeafileApiClient:
                 f"Seafile download failed for {file.path}: {exc}"
             ) from exc
         self._raise_for_response(response, "GET", download_url)
-        return response.content.decode("utf-8", errors="replace")
+        return response.content
 
     def _iter_files_at_path(
-        self, library: SeafileLibrary, directory_path: str
+        self,
+        library: SeafileLibrary,
+        directory_path: str,
+        *,
+        seen_directory_paths: set[str],
+        seen_file_identities: set[str],
     ) -> Iterator[SeafileRemoteFile]:
-        payload = self._request_json(
-            "GET",
-            f"/api2/repos/{quote(library.id, safe='')}/dir/?p={quote(directory_path)}",
-        )
-        if not isinstance(payload, list):
-            raise ConnectorValidationError("Seafile directory payload is invalid")
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            item_type = _string_value(item.get("type"))
-            name = _string_value(item.get("name"))
-            if not name:
-                continue
-            child_path = _join_seafile_path(directory_path, name)
-            if item_type == "dir":
-                yield from self._iter_files_at_path(library, child_path)
-            elif item_type == "file":
-                yield self._file_from_payload(library, child_path, item)
+        if directory_path in seen_directory_paths:
+            raise ConnectorValidationError(
+                f"Duplicate Seafile directory traversal path: {directory_path}"
+            )
+        seen_directory_paths.add(directory_path)
+
+        start = 0
+        pages_seen = 0
+        while True:
+            if pages_seen >= self._max_pages_per_directory:
+                raise ConnectorValidationError(
+                    "Seafile directory pagination exceeded the configured safety "
+                    f"limit for {directory_path}"
+                )
+            payload = self._request_json(
+                "GET",
+                f"/api2/repos/{quote(library.id, safe='')}/dir/?"
+                f"p={quote(directory_path)}&start={start}&limit={self._page_size}",
+            )
+            pages_seen += 1
+            if not isinstance(payload, list):
+                raise ConnectorValidationError("Seafile directory payload is invalid")
+
+            page_item_count = 0
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise ConnectorValidationError(
+                        "Seafile directory payload contains a non-object entry"
+                    )
+                item_type = _string_value(item.get("type"))
+                name = _string_value(item.get("name"))
+                if not name or item_type not in {"dir", "file"}:
+                    raise ConnectorValidationError(
+                        "Seafile directory payload contains an ambiguous entry"
+                    )
+                page_item_count += 1
+                child_path = _join_seafile_path(directory_path, name)
+                if item_type == "dir":
+                    yield from self._iter_files_at_path(
+                        library,
+                        child_path,
+                        seen_directory_paths=seen_directory_paths,
+                        seen_file_identities=seen_file_identities,
+                    )
+                elif item_type == "file":
+                    file = self._file_from_payload(library, child_path, item)
+                    identity = f"{file.library_id}:{file.id}"
+                    if identity in seen_file_identities:
+                        raise ConnectorValidationError(
+                            f"Duplicate Seafile file identity encountered: {identity}"
+                        )
+                    seen_file_identities.add(identity)
+                    yield file
+
+            if page_item_count < self._page_size:
+                break
+            start += self._page_size
 
     def _file_from_payload(
         self, library: SeafileLibrary, path: str, payload: dict[str, Any]
@@ -313,11 +379,17 @@ class SeafileConnector(LoadConnector, PollConnector):
                     counts.skipped_count += 1
                     continue
                 try:
-                    text = self.client.download_text(file)
+                    _document_id(file, adoption=self.adoption, base_url=self.base_url)
+                    raw_bytes = self.client.download_bytes(file)
+                    extraction_result = extract_text_and_images(
+                        io.BytesIO(raw_bytes),
+                        file_name=file.name,
+                        content_type=file.content_type,
+                    )
                     document = _document_from_file(
                         self.base_url,
                         file,
-                        text,
+                        extraction_result,
                         adoption=self.adoption,
                     )
                     counts.indexed_count += 1
@@ -372,7 +444,7 @@ class SeafileConnector(LoadConnector, PollConnector):
 def _document_from_file(
     base_url: str,
     file: SeafileRemoteFile,
-    text: str,
+    extraction_result: ExtractionResult,
     *,
     adoption: SeafileAdoptionConfig,
 ) -> Document:
@@ -390,18 +462,34 @@ def _document_from_file(
         "modifier_name": file.modifier_name,
     }
     metadata.update({key: value for key, value in optional_metadata.items() if value})
+    metadata.update(
+        {
+            key: str(value)
+            for key, value in extraction_result.metadata.items()
+            if value is not None and str(value)
+        }
+    )
     document_id = _document_id(file, adoption=adoption, base_url=base_url)
     source = (
         DocumentSource.INGESTION_API
         if adoption.adopt_existing_ingestion_api
         else DocumentSource.SEAFILE
     )
+    if not extraction_result.text_content.strip():
+        raise ConnectorValidationError(
+            f"Seafile rich extraction produced no indexable content for {file.path}"
+        )
     return Document(
         id=document_id,
         source=source,
         semantic_identifier=f"{file.library_name}{file.path}",
         title=file.name,
-        sections=[TextSection(link=_canonical_link(base_url, file), text=text)],
+        sections=[
+            TextSection(
+                link=_canonical_link(base_url, file),
+                text=extraction_result.text_content.strip(),
+            )
+        ],
         metadata=metadata,
         doc_updated_at=file.mtime,
         from_ingestion_api=adoption.adopt_existing_ingestion_api,

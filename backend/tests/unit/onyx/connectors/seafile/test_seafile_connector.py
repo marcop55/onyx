@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
+import onyx.connectors.seafile.connector as seafile_connector_module
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.exceptions import ConnectorValidationError
-from onyx.connectors.models import ConnectorFailure, Document
-from onyx.connectors.seafile.connector import SeafileConnector
+from onyx.connectors.models import ConnectorFailure, Document, TextSection
+from onyx.connectors.seafile.connector import SeafileApiClient, SeafileConnector
 from onyx.connectors.seafile.models import SeafileLibrary, SeafileRemoteFile
+from onyx.file_processing.extract_file_text import ExtractionResult
 
 
 class FakeSeafileClient:
@@ -27,9 +30,68 @@ class FakeSeafileClient:
         assert library.id == "lib-1"
         yield seafile_file(library)
 
-    def download_text(self, file: SeafileRemoteFile) -> str:
+    def download_bytes(self, file: SeafileRemoteFile) -> bytes:
         self.downloaded_paths.append((file.library_id, file.path))
-        return "# Launch plan\n\nShip first-class Seafile knowledge."
+        return b"# Launch plan\n\nShip first-class Seafile knowledge."
+
+
+class FakeResponse:
+    def __init__(self, payload: Any, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = str(payload)
+        self.content = b"downloaded"
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class FakePaginatedSession:
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+        self.requested_urls: list[str] = []
+
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        if "p=/&start=0&limit=2" in url:
+            return FakeResponse(
+                [
+                    {"type": "dir", "name": "Strategy", "id": "dir-1"},
+                    {"type": "file", "name": "root.pdf", "id": "file-root"},
+                ]
+            )
+        if "p=/&start=2&limit=2" in url:
+            return FakeResponse(
+                [{"type": "file", "name": "brief.docx", "id": "file-brief"}]
+            )
+        if "p=/Strategy&start=0&limit=2" in url:
+            return FakeResponse(
+                [{"type": "file", "name": "Launch Plan.md", "id": "file-launch"}]
+            )
+        if "/api/v2.1/" in url:
+            return FakeResponse({"error": "not found"}, status_code=404)
+        return FakeResponse([])
+
+    def get(self, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert timeout == 30
+        return FakeResponse("https://download.example.com/file")
+
+
+class FakeDuplicatePageSession(FakePaginatedSession):
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        if "start=0" in url:
+            return FakeResponse([{"type": "file", "name": "a.md", "id": "same-id"}])
+        if "start=1" in url:
+            return FakeResponse(
+                [{"type": "file", "name": "a-copy.md", "id": "same-id"}]
+            )
+        return FakeResponse([])
 
 
 class FakeMultiLibraryClient(FakeSeafileClient):
@@ -52,6 +114,57 @@ class FakeSeafileImageClient(FakeSeafileClient):
             mtime=datetime(2026, 8, 14, 12, 30, tzinfo=timezone.utc),
             content_type="image/png",
         )
+
+
+class FakeUnsupportedFileClient(FakeSeafileClient):
+    def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
+        yield SeafileRemoteFile(
+            library_id=library.id,
+            library_name=library.name,
+            path="/Designs/archive.zip",
+            id="file-zip",
+            name="archive.zip",
+            size=256,
+        )
+
+
+class FakeSeafilePdfClient(FakeSeafileClient):
+    def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
+        yield SeafileRemoteFile(
+            library_id=library.id,
+            library_name=library.name,
+            path="/Reports/board.pdf",
+            id="file-pdf",
+            name="board.pdf",
+            content_type="application/pdf",
+        )
+
+    def download_bytes(self, file: SeafileRemoteFile) -> bytes:
+        self.downloaded_paths.append((file.library_id, file.path))
+        return b"%PDF-1.7\x00binary"
+
+
+@pytest.fixture(autouse=True)
+def default_rich_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_extract_text_and_images(
+        file: Any,
+        file_name: str,
+        content_type: str | None = None,
+        **_: Any,
+    ) -> Any:
+        assert file_name
+        assert content_type is not None
+        return ExtractionResult(
+            text_content=file.read().decode("utf-8"),
+            embedded_images=[],
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        seafile_connector_module,
+        "extract_text_and_images",
+        fake_extract_text_and_images,
+    )
 
 
 def seafile_file(library: SeafileLibrary) -> SeafileRemoteFile:
@@ -185,14 +298,12 @@ def test_seafile_connector_preserves_revision_link_exclusion_and_skip_counts() -
     assert connector.health_snapshot().indexed_count == 0
 
 
-def test_seafile_connector_skips_non_index_eligible_files_without_downloading() -> None:
-    client = FakeSeafileImageClient()
+def test_seafile_connector_skips_unsupported_files_without_downloading() -> None:
+    client = FakeUnsupportedFileClient()
     connector = SeafileConnector(
         base_url="https://seafile.example.com",
         library_ids=["lib-1"],
-        ingestion_api_document_id_mappings={
-            "lib-1:/Designs/mockup.png": "stable-image"
-        },
+        ingestion_api_document_id_mappings={"lib-1:/Designs/archive.zip": "stable-zip"},
         batch_size=10,
         client=client,
     )
@@ -202,6 +313,86 @@ def test_seafile_connector_skips_non_index_eligible_files_without_downloading() 
     assert documents == []
     assert client.downloaded_paths == []
     assert connector.health_snapshot().skipped_count == 1
+
+
+def test_seafile_api_client_exhaustively_paginates_legacy_dirents_without_v21(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = FakePaginatedSession()
+    monkeypatch.setattr(
+        seafile_connector_module.requests, "Session", lambda: fake_session
+    )
+    client = SeafileApiClient(
+        "https://seafile.example.com", "token", page_size=2, max_pages_per_directory=4
+    )
+
+    files = list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert [file.path for file in files] == [
+        "/Strategy/Launch Plan.md",
+        "/root.pdf",
+        "/brief.docx",
+    ]
+    assert all("/api/v2.1/" not in url for url in fake_session.requested_urls)
+    assert any("start=2&limit=2" in url for url in fake_session.requested_urls)
+
+
+def test_seafile_api_client_fails_closed_on_duplicate_file_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        seafile_connector_module.requests, "Session", lambda: FakeDuplicatePageSession()
+    )
+    client = SeafileApiClient(
+        "https://seafile.example.com", "token", page_size=1, max_pages_per_directory=4
+    )
+
+    with pytest.raises(ConnectorValidationError) as exc_info:
+        list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert "Duplicate Seafile file identity" in str(exc_info.value)
+
+
+def test_seafile_connector_uses_rich_extraction_for_binary_formats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[bytes, str, str | None]] = []
+
+    def fake_extract_text_and_images(
+        file: Any,
+        file_name: str,
+        content_type: str | None = None,
+        **_: Any,
+    ) -> Any:
+        raw = file.read()
+        calls.append((raw, file_name, content_type))
+        return ExtractionResult(
+            text_content="rich pdf text",
+            embedded_images=[],
+            metadata={"Author": "OneQode"},
+        )
+
+    monkeypatch.setattr(
+        seafile_connector_module,
+        "extract_text_and_images",
+        fake_extract_text_and_images,
+    )
+
+    client = FakeSeafilePdfClient()
+    connector = SeafileConnector(
+        base_url="https://seafile.example.com",
+        library_ids=["lib-1"],
+        ingestion_api_document_id_mappings={"file-pdf": "stable-pdf"},
+        client=client,
+    )
+
+    documents = _collect_documents(connector)
+
+    assert calls == [(b"%PDF-1.7\x00binary", "board.pdf", "application/pdf")]
+    assert len(documents) == 1
+    assert isinstance(documents[0].sections[0], TextSection)
+    assert documents[0].sections[0].text == "rich pdf text"
+    assert documents[0].metadata["Author"] == "OneQode"
 
 
 def test_seafile_connector_validates_exact_library_ids_and_rejects_missing_ids() -> (
