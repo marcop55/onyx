@@ -55,6 +55,29 @@ class FakePaginatedSession:
         self.requested_urls.append(url)
         assert method == "GET"
         assert timeout == 30
+        if "p=/&recursive=1" in url:
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "parent_dir": "/Strategy",
+                        "name": "Launch Plan.md",
+                        "id": "file-launch",
+                    },
+                    {
+                        "type": "file",
+                        "parent_dir": "/",
+                        "name": "root.pdf",
+                        "id": "file-root",
+                    },
+                    {
+                        "type": "file",
+                        "parent_dir": "/",
+                        "name": "brief.docx",
+                        "id": "file-brief",
+                    },
+                ]
+            )
         if "p=/&start=0&limit=2" in url:
             return FakeResponse(
                 [
@@ -85,6 +108,23 @@ class FakeDuplicatePageSession(FakePaginatedSession):
         self.requested_urls.append(url)
         assert method == "GET"
         assert timeout == 30
+        if "p=/&recursive=1" in url:
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "parent_dir": "/",
+                        "name": "a.md",
+                        "id": "same-id",
+                    },
+                    {
+                        "type": "file",
+                        "parent_dir": "/",
+                        "name": "a-copy.md",
+                        "id": "same-id",
+                    },
+                ]
+            )
         if "start=0" in url:
             return FakeResponse([{"type": "file", "name": "a.md", "id": "same-id"}])
         if "start=1" in url:
@@ -99,6 +139,23 @@ class FakeDuplicatePathSession(FakePaginatedSession):
         self.requested_urls.append(url)
         assert method == "GET"
         assert timeout == 30
+        if "p=/&recursive=1" in url:
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "parent_dir": "/",
+                        "name": "a.md",
+                        "id": "first-id",
+                    },
+                    {
+                        "type": "file",
+                        "parent_dir": "/",
+                        "name": "a.md",
+                        "id": "second-id",
+                    },
+                ]
+            )
         if "start=0" in url:
             return FakeResponse([{"type": "file", "name": "a.md", "id": "first-id"}])
         if "start=1" in url:
@@ -111,6 +168,27 @@ class FakeAcceptedInventorySession(FakePaginatedSession):
         self.requested_urls.append(url)
         assert method == "GET"
         assert timeout == 30
+        if "p=/&recursive=1" in url:
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "parent_dir": "/Admitted",
+                        "name": f"doc-{idx:03}.pdf",
+                        "id": f"active-{idx:03}",
+                    }
+                    for idx in range(278)
+                ]
+                + [
+                    {
+                        "type": "file",
+                        "parent_dir": "/Archive",
+                        "name": f"rejected-{idx:03}.pdf",
+                        "id": f"archived-{idx:03}",
+                    }
+                    for idx in range(204)
+                ]
+            )
         if "p=/&start=0&limit=100" in url:
             return FakeResponse(
                 [
@@ -145,12 +223,81 @@ class FakeAcceptedInventorySession(FakePaginatedSession):
         return FakeResponse([])
 
 
+class FakeLiveLegacyRecursiveInventorySession(FakePaginatedSession):
+    def request(self, method: str, url: str, timeout: int) -> FakeResponse:
+        self.requested_urls.append(url)
+        assert method == "GET"
+        assert timeout == 30
+        if "p=/&recursive=1" in url:
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "parent_dir": "/Admitted",
+                        "name": f"doc-{idx:03}.pdf",
+                        "id": f"active-{idx:03}",
+                    }
+                    for idx in range(278)
+                ]
+                + [
+                    {
+                        "type": "file",
+                        "parent_dir": "/Archive",
+                        "name": f"rejected-{idx:03}.pdf",
+                        "id": f"archived-{idx:03}",
+                    }
+                    for idx in range(204)
+                ]
+            )
+        if "p=/&start=0&limit=100" in url:
+            return FakeResponse(
+                [
+                    {"type": "dir", "name": "Admitted", "id": "dir-admitted"},
+                    {"type": "dir", "name": "Archive", "id": "dir-archive"},
+                ]
+            )
+        if "p=/Admitted&" in url:
+            start = _start_from_url(url)
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "name": f"doc-{idx:03}.pdf",
+                        "id": f"active-{idx:03}",
+                    }
+                    for idx in range(start, min(start + 100, 190))
+                ]
+            )
+        if "p=/Archive&" in url:
+            start = _start_from_url(url)
+            return FakeResponse(
+                [
+                    {
+                        "type": "file",
+                        "name": f"rejected-{idx:03}.pdf",
+                        "id": f"archived-{idx:03}",
+                    }
+                    for idx in range(start, min(start + 100, 203))
+                ]
+            )
+        return FakeResponse([])
+
+
 class FakeUnsafePathSession(FakePaginatedSession):
     def request(self, method: str, url: str, timeout: int) -> FakeResponse:
         self.requested_urls.append(url)
         assert method == "GET"
         assert timeout == 30
-        return FakeResponse([{"type": "file", "name": "../escape.md", "id": "escape"}])
+        return FakeResponse(
+            [
+                {
+                    "type": "file",
+                    "parent_dir": "/",
+                    "name": "../escape.md",
+                    "id": "escape",
+                }
+            ]
+        )
 
 
 class FakeFullPageForeverSession(FakePaginatedSession):
@@ -491,7 +638,7 @@ def test_seafile_connector_skips_unsupported_files_without_downloading() -> None
     assert connector.health_snapshot().skipped_count == 1
 
 
-def test_seafile_api_client_exhaustively_paginates_legacy_dirents_without_v21(
+def test_seafile_api_client_uses_legacy_recursive_dirents_without_v21(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_session = FakePaginatedSession()
@@ -510,7 +657,8 @@ def test_seafile_api_client_exhaustively_paginates_legacy_dirents_without_v21(
         "/brief.docx",
     ]
     assert all("/api/v2.1/" not in url for url in fake_session.requested_urls)
-    assert any("start=2&limit=2" in url for url in fake_session.requested_urls)
+    assert any("p=/&recursive=1" in url for url in fake_session.requested_urls)
+    assert not any("start=" in url for url in fake_session.requested_urls)
 
 
 def test_seafile_api_client_scopes_duplicate_backend_file_ids_by_path(
@@ -563,12 +711,28 @@ def test_seafile_api_client_exhaustively_traverses_accepted_482_file_inventory(
     assert len(files) == 482
     assert sum(1 for file in files if file.path.startswith("/Admitted/")) == 278
     assert sum(1 for file in files if file.path.startswith("/Archive/")) == 204
-    assert any(
-        "p=/Admitted&start=200&limit=100" in url for url in fake_session.requested_urls
+    assert any("p=/&recursive=1" in url for url in fake_session.requested_urls)
+    assert not any("start=" in url for url in fake_session.requested_urls)
+
+
+def test_seafile_api_client_uses_legacy_recursive_contract_for_live_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = FakeLiveLegacyRecursiveInventorySession()
+    monkeypatch.setattr(
+        seafile_connector_module.requests, "Session", lambda: fake_session
     )
-    assert any(
-        "p=/Archive&start=200&limit=100" in url for url in fake_session.requested_urls
+    client = SeafileApiClient(
+        "https://seafile.example.com", "token", page_size=100, max_pages_per_directory=5
     )
+
+    files = list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
+
+    assert len(files) == 482
+    assert sum(1 for file in files if file.path.startswith("/Admitted/")) == 278
+    assert sum(1 for file in files if file.path.startswith("/Archive/")) == 204
+    assert any("p=/&recursive=1" in url for url in fake_session.requested_urls)
+    assert not any("start=" in url for url in fake_session.requested_urls)
 
 
 def test_seafile_api_client_fails_closed_on_unsafe_paths(
@@ -600,7 +764,7 @@ def test_seafile_api_client_fails_closed_on_pagination_truncation(
     with pytest.raises(ConnectorValidationError) as exc_info:
         list(client.iter_files(SeafileLibrary(id="lib-1", name="OneQode")))
 
-    assert "pagination exceeded" in str(exc_info.value)
+    assert "ambiguous file entry" in str(exc_info.value)
 
 
 def test_seafile_connector_uses_rich_extraction_for_binary_formats(

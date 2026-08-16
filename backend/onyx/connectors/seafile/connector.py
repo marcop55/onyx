@@ -121,14 +121,46 @@ class SeafileApiClient:
         return libraries
 
     def iter_files(self, library: SeafileLibrary) -> Iterator[SeafileRemoteFile]:
-        seen_directory_paths: set[str] = set()
         seen_file_paths: set[str] = set()
-        yield from self._iter_files_at_path(
-            library,
-            "/",
-            seen_directory_paths=seen_directory_paths,
-            seen_file_paths=seen_file_paths,
+        yield from self._iter_files_recursively(
+            library, seen_file_paths=seen_file_paths
         )
+
+    def _iter_files_recursively(
+        self, library: SeafileLibrary, *, seen_file_paths: set[str]
+    ) -> Iterator[SeafileRemoteFile]:
+        payload = self._request_json(
+            "GET",
+            f"/api2/repos/{quote(library.id, safe='')}/dir/?p=/&recursive=1&t=f",
+        )
+        if not isinstance(payload, list):
+            raise ConnectorValidationError(
+                "Seafile recursive directory payload is invalid"
+            )
+
+        for item in payload:
+            if not isinstance(item, dict):
+                raise ConnectorValidationError(
+                    "Seafile recursive directory payload contains a non-object entry"
+                )
+            item_type = _string_value(item.get("type"))
+            name = _string_value(item.get("name"))
+            parent_dir = _string_value(item.get("parent_dir"))
+            if item_type != "file" or not name or not parent_dir:
+                raise ConnectorValidationError(
+                    "Seafile recursive directory payload contains an ambiguous file entry"
+                )
+            _validate_safe_seafile_path(parent_dir)
+            file = self._file_from_payload(
+                library, _join_seafile_path(parent_dir, name), item
+            )
+            path_identity = f"{file.library_id}:{file.path}"
+            if path_identity in seen_file_paths:
+                raise ConnectorValidationError(
+                    f"Duplicate Seafile file path encountered: {path_identity}"
+                )
+            seen_file_paths.add(path_identity)
+            yield file
 
     def download_bytes(self, file: SeafileRemoteFile) -> bytes:
         download_url = file.download_url or self._get_download_url(file)
@@ -568,6 +600,23 @@ def _validate_safe_seafile_path_segment(name: str) -> None:
     if any(part in {".", ".."} for part in name.split("/")):
         raise ConnectorValidationError(
             f"Seafile directory payload contains unsafe path segment: {name}"
+        )
+
+
+def _validate_safe_seafile_path(path: str) -> None:
+    if not path.startswith("/") or "\\" in path:
+        raise ConnectorValidationError(
+            f"Seafile directory payload contains unsafe path: {path}"
+        )
+    if path == "/":
+        return
+    if path != "/" and path.endswith("/"):
+        raise ConnectorValidationError(
+            f"Seafile directory payload contains unsafe path: {path}"
+        )
+    if any(part in {".", "..", ""} for part in path.strip("/").split("/")):
+        raise ConnectorValidationError(
+            f"Seafile directory payload contains unsafe path: {path}"
         )
 
 
