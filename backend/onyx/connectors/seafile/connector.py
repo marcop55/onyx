@@ -507,9 +507,7 @@ def _document_id(
             raise ConnectorValidationError(
                 "Seafile Ingestion API adoption requires base_url to resolve document IDs"
             )
-        document_id = _adopted_document_id(
-            base_url, file, adoption.document_id_mappings
-        )
+        document_id = _adopted_document_id(file, adoption.document_id_mappings)
         if document_id is None:
             raise ConnectorValidationError(
                 "Seafile Ingestion API adoption is enabled, but no existing "
@@ -523,22 +521,11 @@ def _document_id(
 
 
 def _adopted_document_id(
-    base_url: str,
-    file: SeafileRemoteFile,
-    mappings: Mapping[str, str] | None,
+    file: SeafileRemoteFile, mappings: Mapping[str, str] | None
 ) -> str | None:
     if not mappings:
         return None
-    candidates = (
-        f"{file.library_id}:{file.path}",
-        _canonical_link(base_url, file),
-        file.path,
-    )
-    for candidate in candidates:
-        document_id = mappings.get(candidate)
-        if document_id:
-            return document_id
-    return None
+    return mappings.get(f"{file.library_id}:{file.path}")
 
 
 @dataclass

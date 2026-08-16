@@ -171,6 +171,11 @@ class FakeMultiLibraryClient(FakeSeafileClient):
         ]
 
 
+class FakeMultiLibrarySamePathClient(FakeMultiLibraryClient):
+    def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
+        yield seafile_file(library)
+
+
 class FakeSeafileImageClient(FakeSeafileClient):
     def iter_files(self, library: SeafileLibrary) -> Iterable[SeafileRemoteFile]:
         yield SeafileRemoteFile(
@@ -368,6 +373,30 @@ def test_seafile_connector_requires_path_scoped_existing_document_mapping() -> N
 
     assert documents == []
     assert len(failures) == 1
+    assert "no exact path-scoped document_id mapping" in failures[0].failure_message
+
+
+def test_seafile_connector_requires_library_scoped_path_mapping() -> None:
+    client = FakeMultiLibrarySamePathClient()
+    connector = SeafileConnector(
+        base_url="https://seafile.example.com/",
+        library_ids=["lib-1", "lib-2"],
+        ingestion_api_document_id_mappings={
+            "lib-1:/Strategy/Launch Plan.md": "stable-lib-1",
+            "/Strategy/Launch Plan.md": "path-only-fallback",
+        },
+        batch_size=10,
+        client=client,
+    )
+
+    items = [item for batch in connector.load_from_state() for item in batch]
+    documents = [item for item in items if isinstance(item, Document)]
+    failures = [item for item in items if isinstance(item, ConnectorFailure)]
+
+    assert [document.id for document in documents] == ["stable-lib-1"]
+    assert client.downloaded_paths == [("lib-1", "/Strategy/Launch Plan.md")]
+    assert len(failures) == 1
+    assert "lib-2:/Strategy/Launch Plan.md" in failures[0].failure_message
     assert "no exact path-scoped document_id mapping" in failures[0].failure_message
 
 
