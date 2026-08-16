@@ -1,8 +1,10 @@
 from datetime import datetime
 from http import HTTPStatus
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -58,6 +60,11 @@ from onyx.db.permission_sync_attempt import (
     get_recent_doc_permission_sync_attempts_for_cc_pair,
     get_relevant_external_group_sync_attempts_for_cc_pair,
 )
+from onyx.db.seafile_adoption import (
+    SeafileAdoptionResult,
+    adopt_ingestion_api_cc_pair_as_managed_seafile,
+    rollback_managed_seafile_adoption,
+)
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.redis.redis_connector import RedisConnector
@@ -94,6 +101,77 @@ from shared_configs.contextvars import get_current_tenant_id
 
 logger = setup_logger()
 router = APIRouter(prefix="/manage")
+
+
+class ManagedSeafileAdoptionRequest(BaseModel):
+    expected_document_ids: list[str] = Field(min_length=1)
+    seafile_connector_config: dict[str, Any]
+    seafile_credential_updates: dict[str, Any] = Field(min_length=1)
+    connector_name: str = "Managed Seafile"
+
+
+class ManagedSeafileAdoptionResponse(BaseModel):
+    cc_pair_id: int
+    connector_id: int
+    credential_id: int
+    adopted_document_count: int
+    was_already_adopted: bool
+
+    @classmethod
+    def from_result(
+        cls, result: SeafileAdoptionResult
+    ) -> "ManagedSeafileAdoptionResponse":
+        return cls(
+            cc_pair_id=result.cc_pair_id,
+            connector_id=result.connector_id,
+            credential_id=result.credential_id,
+            adopted_document_count=result.adopted_document_count,
+            was_already_adopted=result.was_already_adopted,
+        )
+
+
+@router.post("/admin/cc-pair/{cc_pair_id}/managed-seafile-adoption")
+def adopt_cc_pair_as_managed_seafile(
+    cc_pair_id: int,
+    request: ManagedSeafileAdoptionRequest,
+    user: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+    db_session: Session = Depends(get_session),
+) -> ManagedSeafileAdoptionResponse:
+    result = adopt_ingestion_api_cc_pair_as_managed_seafile(
+        db_session,
+        cc_pair_id=cc_pair_id,
+        expected_document_ids=set(request.expected_document_ids),
+        seafile_connector_config=request.seafile_connector_config,
+        seafile_credential_updates=request.seafile_credential_updates,
+        connector_name=request.connector_name,
+    )
+    emit_audit_event(
+        AuditAction.CC_PAIR_UPDATE,
+        AuditOutcome.SUCCESS,
+        actor=actor_from_user(user),
+        resource_type="connector_credential_pair",
+        resource_id=cc_pair_id,
+        extra={"managed_seafile_adoption": True},
+    )
+    return ManagedSeafileAdoptionResponse.from_result(result)
+
+
+@router.post("/admin/cc-pair/{cc_pair_id}/managed-seafile-adoption/rollback")
+def rollback_cc_pair_managed_seafile_adoption(
+    cc_pair_id: int,
+    user: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+    db_session: Session = Depends(get_session),
+) -> ManagedSeafileAdoptionResponse:
+    result = rollback_managed_seafile_adoption(db_session, cc_pair_id=cc_pair_id)
+    emit_audit_event(
+        AuditAction.CC_PAIR_UPDATE,
+        AuditOutcome.SUCCESS,
+        actor=actor_from_user(user),
+        resource_type="connector_credential_pair",
+        resource_id=cc_pair_id,
+        extra={"managed_seafile_adoption_rollback": True},
+    )
+    return ManagedSeafileAdoptionResponse.from_result(result)
 
 
 @router.get("/admin/cc-pair/{cc_pair_id}/index-attempts", tags=PUBLIC_API_TAGS)
