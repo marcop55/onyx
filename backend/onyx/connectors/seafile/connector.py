@@ -36,7 +36,6 @@ from onyx.file_processing.file_types import OnyxFileExtensions
 _DEFAULT_INDEXABLE_EXTENSIONS = OnyxFileExtensions.ALL_ALLOWED_EXTENSIONS
 _DEFAULT_PAGE_SIZE = 100
 _DEFAULT_MAX_PAGES_PER_DIRECTORY = 10_000
-_LIVE_INCOMPLETE_RECURSIVE_FILE_COUNT = 393
 
 
 class SeafileClient(Protocol):
@@ -122,58 +121,15 @@ class SeafileApiClient:
         return libraries
 
     def iter_files(self, library: SeafileLibrary) -> Iterator[SeafileRemoteFile]:
-        recursive_files = list(
-            self._iter_files_recursively(library, seen_file_paths=set())
+        # The legacy recursive route (/dir/?p=/&recursive=1&t=f) returns stale and
+        # incomplete inventories on live servers, so the paginated per-directory
+        # traversal is the only authoritative enumeration.
+        yield from self._iter_files_at_path(
+            library,
+            "/",
+            seen_directory_paths=set(),
+            seen_file_paths=set(),
         )
-        if len(recursive_files) == _LIVE_INCOMPLETE_RECURSIVE_FILE_COUNT:
-            exhaustive_files = list(
-                self._iter_files_at_path(
-                    library,
-                    "/",
-                    seen_directory_paths=set(),
-                    seen_file_paths=set(),
-                )
-            )
-            if len(exhaustive_files) > len(recursive_files):
-                yield from exhaustive_files
-                return
-        yield from recursive_files
-
-    def _iter_files_recursively(
-        self, library: SeafileLibrary, *, seen_file_paths: set[str]
-    ) -> Iterator[SeafileRemoteFile]:
-        payload = self._request_json(
-            "GET",
-            f"/api2/repos/{quote(library.id, safe='')}/dir/?p=/&recursive=1&t=f",
-        )
-        if not isinstance(payload, list):
-            raise ConnectorValidationError(
-                "Seafile recursive directory payload is invalid"
-            )
-
-        for item in payload:
-            if not isinstance(item, dict):
-                raise ConnectorValidationError(
-                    "Seafile recursive directory payload contains a non-object entry"
-                )
-            item_type = _string_value(item.get("type"))
-            name = _string_value(item.get("name"))
-            parent_dir = _string_value(item.get("parent_dir"))
-            if item_type != "file" or not name or not parent_dir:
-                raise ConnectorValidationError(
-                    "Seafile recursive directory payload contains an ambiguous file entry"
-                )
-            _validate_safe_seafile_path(parent_dir)
-            file = self._file_from_payload(
-                library, _join_seafile_path(parent_dir, name), item
-            )
-            path_identity = f"{file.library_id}:{file.path}"
-            if path_identity in seen_file_paths:
-                raise ConnectorValidationError(
-                    f"Duplicate Seafile file path encountered: {path_identity}"
-                )
-            seen_file_paths.add(path_identity)
-            yield file
 
     def download_bytes(self, file: SeafileRemoteFile) -> bytes:
         download_url = file.download_url or self._get_download_url(file)
@@ -412,8 +368,37 @@ class SeafileConnector(LoadConnector, PollConnector):
         assert self.client is not None
         selected_libraries = self._selected_libraries(self.client.list_libraries())
         counts.selected_library_count = len(selected_libraries)
-        for library in selected_libraries:
-            files = list(self.client.iter_files(library))
+        library_inventories = [
+            (library, list(self.client.iter_files(library)))
+            for library in selected_libraries
+        ]
+        orphaned_mapping_keys = _orphaned_adoption_mapping_keys(
+            [file for _, files in library_inventories for file in files],
+            adoption=self.adoption,
+        )
+        if orphaned_mapping_keys:
+            configured_mappings = self.adoption.document_id_mappings or {}
+            for mapping_key in orphaned_mapping_keys:
+                counts.error_count += 1
+                failure_message = (
+                    "Seafile Ingestion API adoption is enabled, but the configured "
+                    f"document_id mapping key {mapping_key} matches no live remote "
+                    "path in the discovered inventory. Refusing adoption to protect "
+                    "the existing canonical document from reconciliation loss."
+                )
+                yield cast(
+                    Document,
+                    ConnectorFailure(
+                        failed_document=DocumentFailure(
+                            document_id=configured_mappings[mapping_key],
+                        ),
+                        failure_message=failure_message,
+                        exception=ConnectorValidationError(failure_message),
+                    ),
+                )
+            return
+
+        for library, files in library_inventories:
             candidate_files = [
                 file
                 for file in files
@@ -600,6 +585,19 @@ def _adopted_document_id(
     return mappings.get(f"{file.library_id}:{file.path}")
 
 
+def _orphaned_adoption_mapping_keys(
+    files: list[SeafileRemoteFile], *, adoption: SeafileAdoptionConfig
+) -> list[str]:
+    if not adoption.adopt_existing_ingestion_api:
+        return []
+    live_path_keys = {f"{file.library_id}:{file.path}" for file in files}
+    return sorted(
+        mapping_key
+        for mapping_key in (adoption.document_id_mappings or {})
+        if mapping_key not in live_path_keys
+    )
+
+
 def _adoption_mapping_failure(
     files: list[SeafileRemoteFile], *, adoption: SeafileAdoptionConfig
 ) -> str | None:
@@ -659,23 +657,6 @@ def _validate_safe_seafile_path_segment(name: str) -> None:
     if any(part in {".", ".."} for part in name.split("/")):
         raise ConnectorValidationError(
             f"Seafile directory payload contains unsafe path segment: {name}"
-        )
-
-
-def _validate_safe_seafile_path(path: str) -> None:
-    if not path.startswith("/") or "\\" in path:
-        raise ConnectorValidationError(
-            f"Seafile directory payload contains unsafe path: {path}"
-        )
-    if path == "/":
-        return
-    if path != "/" and path.endswith("/"):
-        raise ConnectorValidationError(
-            f"Seafile directory payload contains unsafe path: {path}"
-        )
-    if any(part in {".", "..", ""} for part in path.strip("/").split("/")):
-        raise ConnectorValidationError(
-            f"Seafile directory payload contains unsafe path: {path}"
         )
 
 
