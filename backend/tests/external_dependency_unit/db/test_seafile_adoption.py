@@ -423,13 +423,24 @@ def test_seafile_adoption_preserves_document_set_agent_and_index_identity(
         cleanup_cc_pair(db_session, pair)
 
 
-def test_seafile_adoption_uses_deterministic_482_to_278_inventory(
+def test_seafile_adoption_uses_deterministic_395_to_185_inventory(
     db_session: Session,
 ) -> None:
+    """Mirror the live topology recorded on issue #72.
+
+    The library holds 395 enumerable files: 185 canonical documents under the
+    approved roots, 205 files in excluded scope, and 5 untracked vault-metadata
+    files that adoption never receives.
+    """
     pair = make_cc_pair(db_session, source=DocumentSource.INGESTION_API)
-    admitted_paths = {f"/Admitted/doc-{idx:03}.pdf" for idx in range(278)}
-    rejected_paths = {f"/Archive/rejected-{idx:03}.pdf" for idx in range(204)}
-    assert len(admitted_paths | rejected_paths) == 482
+    admitted_paths = {f"/Projects/doc-{idx:03}.pdf" for idx in range(185)}
+    rejected_paths = {f"/Archive/rejected-{idx:03}.pdf" for idx in range(201)} | {
+        f"/Inbox/rejected-{idx:03}.pdf" for idx in range(4)
+    }
+    untracked_paths = {f"/.obsidian/state-{idx:02}.json" for idx in range(5)}
+    assert len(admitted_paths) == 185
+    assert len(rejected_paths) == 205
+    assert len(admitted_paths | rejected_paths | untracked_paths) == 395
     doc_ids = _attach_docs(
         db_session, pair.connector_id, pair.credential_id, count=len(admitted_paths)
     )
@@ -455,7 +466,7 @@ def test_seafile_adoption_uses_deterministic_482_to_278_inventory(
         )
 
         db_session.refresh(pair)
-        assert result.adopted_document_count == 278
+        assert result.adopted_document_count == 185
         assert pair.connector.connector_specific_config["seafile_managed_adoption"][
             "document_ids"
         ] == sorted(doc_ids)
