@@ -1202,3 +1202,41 @@ def test_post_edit_retry_accepted_without_a_channel_row() -> None:
 
     assert event is not None
     assert event.event_type == MattermostNormalizedEventType.POST_UPDATE_RETRY
+
+
+@pytest.mark.asyncio
+async def test_listener_status_tracks_connect_and_failure() -> None:
+    ticks = iter([10.0, 11.0, 12.0, 13.0, 14.0])
+
+    async def record_sleep(_seconds: float) -> None:
+        return None
+
+    envelope = _posted_event(
+        post_id="post_root_1",
+        message="@onyx what changed?",
+        event_id="event_after_reconnect",
+    )
+    listener = MattermostEventListener(
+        _FlakyClient(envelope),
+        _config(
+            initial_reconnect_backoff_seconds=1.0,
+            max_reconnect_backoff_seconds=3.0,
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
+        ),
+        sleep=record_sleep,
+        clock=lambda: next(ticks),
+    )
+
+    assert listener.status.connected is False
+    assert listener.status.consecutive_failures == 0
+
+    event = await anext(listener.normalized_events())
+
+    assert event is not None
+    assert listener.status.connected is True
+    assert listener.status.consecutive_failures == 0
+    assert listener.status.last_connected_at is not None
+    assert listener.status.last_error == "connection dropped"

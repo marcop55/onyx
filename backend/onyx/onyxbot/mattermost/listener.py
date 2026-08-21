@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
@@ -13,6 +14,7 @@ from onyx.configs.constants import QAFeedbackType
 from onyx.onyxbot.mattermost.models import (
     MattermostEventEnvelope,
     MattermostListenerConfig,
+    MattermostListenerStatus,
     MattermostNormalizedEventType,
     MattermostPost,
     MattermostUserInfo,
@@ -401,12 +403,15 @@ class MattermostEventListener:
         config: MattermostListenerConfig,
         *,
         sleep: _SLEEP = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._config = config
         self._normalizer = MattermostEventNormalizer(config)
         self._sleep = sleep
+        self._clock = clock
         self._stopped = False
+        self.status = MattermostListenerStatus()
 
     def stop(self) -> None:
         """Stop reconnecting after the current connection exits."""
@@ -418,6 +423,7 @@ class MattermostEventListener:
         while not self._stopped:
             try:
                 async for envelope in self._connect_events():
+                    self._mark_connected()
                     normalized_event = self._normalizer.normalize(envelope)
                     if normalized_event is not None:
                         authorized_event = await self._authorize_and_attribute_event(
@@ -426,14 +432,33 @@ class MattermostEventListener:
                         if authorized_event is not None:
                             yield authorized_event
                     backoff_seconds = self._config.initial_reconnect_backoff_seconds
+                self._mark_disconnected("connection closed")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self._mark_disconnected(str(exc) or exc.__class__.__name__)
                 await self._sleep(backoff_seconds)
                 backoff_seconds = min(
                     backoff_seconds * 2,
                     self._config.max_reconnect_backoff_seconds,
                 )
+
+    def _mark_connected(self) -> None:
+        """Record a live connection.
+
+        Mattermost sends a hello event immediately after a successful websocket
+        handshake, so an idle-but-connected bot still registers as connected.
+        """
+        if not self.status.connected:
+            self.status.connected = True
+            self.status.last_connected_at = self._clock()
+        self.status.consecutive_failures = 0
+
+    def _mark_disconnected(self, error: str) -> None:
+        self.status.connected = False
+        self.status.last_disconnected_at = self._clock()
+        self.status.consecutive_failures += 1
+        self.status.last_error = error
 
     def normalize(
         self,
