@@ -14,6 +14,7 @@ from starlette.routing import Route
 
 from onyx.onyxbot.mattermost.config import (
     MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV,
+    MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV,
     MATTERMOST_BOT_PERSONA_ID_ENV,
     MATTERMOST_BOT_TOKEN_ENV,
     MATTERMOST_BOT_URL_ENV,
@@ -237,3 +238,28 @@ def test_mattermost_bot_service_exposes_health_route() -> None:
     assert "/health" in route_paths
     assert "/commands/orka" in route_paths
     assert "/commands/orka/{action_name}" in route_paths
+
+
+def test_unhealthy_after_seconds_defaults_to_sixty() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+
+    assert config.unhealthy_after_seconds == 60
+
+
+def test_unhealthy_after_seconds_reads_the_env_override() -> None:
+    with _mattermost_env(
+        {**_REQUIRED_ENV, MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV: "5"}
+    ):
+        config = load_mattermost_bot_config_from_env()
+
+    assert config.unhealthy_after_seconds == 5
+
+
+def test_unhealthy_after_seconds_is_reported_in_redacted_env() -> None:
+    with _mattermost_env(
+        {**_REQUIRED_ENV, MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV: "5"}
+    ):
+        redacted = redacted_mattermost_bot_env()
+
+    assert redacted[MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV] == "5"
