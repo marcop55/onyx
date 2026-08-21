@@ -407,6 +407,66 @@ def test_managed_respond_tag_only_true_suppresses_unmentioned_root_posts() -> No
     assert event is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param("morning all\nstandup in 5", id="multiline"),
+        pytest.param("todo:\n- deploy\n- test", id="markdown_list"),
+        pytest.param("summarize this ", id="trailing_space"),
+        pytest.param(" summarize this", id="leading_space"),
+        pytest.param("summarize  this", id="double_space"),
+    ],
+)
+def test_respond_tag_only_suppresses_unmentioned_root_posts_with_loose_whitespace(
+    message: str,
+) -> None:
+    """Whitespace shape must not stand in for a bot mention."""
+
+    normalizer = MattermostEventNormalizer(
+        _config(
+            root_post_channel_ids=frozenset(),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_managed_root",
+            message=message,
+            channel_id="channel_1",
+        )
+    )
+
+    assert event is None
+
+
+def test_channel_mention_survives_loose_whitespace_in_tag_only_channel() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            root_post_channel_ids=frozenset(),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_managed_mention",
+            message="@onyx  can you summarize this?\nthanks",
+            channel_id="channel_1",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.CHANNEL_MENTION
+    assert event.text == "can you summarize this? thanks"
+
+
 def test_thread_reply_followup_emits_normalized_event_for_owned_thread() -> None:
     normalizer = MattermostEventNormalizer(_config())
 
