@@ -20,6 +20,7 @@ from onyx.configs.app_configs import (
 from onyx.db.engine.sql_engine import SqlEngine, get_session_with_current_tenant
 from onyx.db.mattermost_bot import (
     fetch_mattermost_channel_config_for_bot_and_channel,
+    fetch_mattermost_channel_config_for_channel,
     fetch_mattermost_private_answer_channel_ids,
     get_or_bootstrap_mattermost_slash_command_config,
     hydrate_mattermost_listener_config,
@@ -389,7 +390,7 @@ def _build_managed_channel_config_resolver(
 
     def resolve_channel_config(channel_id: str) -> dict[str, object] | None:
         with get_session_with_current_tenant() as db_session:
-            channel_config = fetch_mattermost_channel_config_for_bot_and_channel(
+            channel_config = fetch_mattermost_channel_config_for_channel(
                 db_session,
                 instance_id=instance_id,
                 bot_user_id=config.listener_config.bot_user_id,
