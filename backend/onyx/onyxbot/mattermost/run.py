@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -45,7 +46,10 @@ from onyx.onyxbot.mattermost.handler import (
 )
 from onyx.onyxbot.mattermost.interactive import handle_mattermost_interactive_action
 from onyx.onyxbot.mattermost.listener import MattermostEventListener
-from onyx.onyxbot.mattermost.models import NormalizedMattermostEvent
+from onyx.onyxbot.mattermost.models import (
+    MattermostListenerStatus,
+    NormalizedMattermostEvent,
+)
 from onyx.onyxbot.mattermost.mutations import (
     AuthoritativePlatformGatewayBridge,
     MattermostMutationAdapter,
@@ -69,7 +73,16 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         listener_ready = asyncio.Event()
-        listener_task = asyncio.create_task(_run_bot(runtime_config, listener_ready))
+        app.state.listener_status = None
+        listener_task = asyncio.create_task(
+            _run_bot(
+                runtime_config,
+                listener_ready,
+                status_sink=lambda status: setattr(
+                    app.state, "listener_status", status
+                ),
+            )
+        )
         readiness_task = asyncio.create_task(listener_ready.wait())
         app.state.listener_task = listener_task
         app.state.listener_ready = listener_ready
@@ -97,10 +110,15 @@ def get_application(config: MattermostBotConfig | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> JSONResponse:
         listener_task: asyncio.Task[None] = app.state.listener_task
-        listener_ready: asyncio.Event = app.state.listener_ready
-        if listener_task.done() or not listener_ready.is_set():
+        status: MattermostListenerStatus | None = app.state.listener_status
+        if listener_task.done() or status is None:
             return JSONResponse(status_code=503, content={"status": "not_ready"})
-        return JSONResponse(status_code=200, content={"status": "ok"})
+        status_code, payload = listener_health_snapshot(
+            status,
+            now=time.monotonic(),
+            unhealthy_after_seconds=runtime_config.unhealthy_after_seconds,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
 
     @app.post("/commands/orka")
     async def orka_command(request: Request) -> JSONResponse:
@@ -282,9 +300,35 @@ def _slash_command_json_response(
     )
 
 
+def listener_health_snapshot(
+    status: MattermostListenerStatus,
+    *,
+    now: float,
+    unhealthy_after_seconds: int,
+) -> tuple[int, dict[str, object]]:
+    """Map listener connection state onto a health status code and payload."""
+    if status.connected:
+        return 200, {"status": "ok"}
+
+    if status.last_connected_at is None:
+        return 503, {"status": "not_ready"}
+
+    disconnected_at = status.last_disconnected_at
+    disconnected_for = 0.0 if disconnected_at is None else now - disconnected_at
+    payload: dict[str, object] = {
+        "consecutive_failures": status.consecutive_failures,
+        "last_error": status.last_error,
+    }
+    if disconnected_for < unhealthy_after_seconds:
+        return 200, {"status": "reconnecting", **payload}
+    return 503, {"status": "disconnected", **payload}
+
+
 async def _run_bot(
     config: MattermostBotConfig,
     ready_event: asyncio.Event | None = None,
+    *,
+    status_sink: Callable[[MattermostListenerStatus], None] | None = None,
 ) -> None:
     with get_session_with_current_tenant() as db_session:
         hydrate_mattermost_listener_config(db_session, config.listener_config)
@@ -343,9 +387,11 @@ async def _run_bot(
             )
         try:
             listener = MattermostEventListener(client, listener_config)
-            if ready_event is not None:
-                ready_event.set()
+            if status_sink is not None:
+                status_sink(listener.status)
             async for event in listener.normalized_events():
+                if ready_event is not None and not ready_event.is_set():
+                    ready_event.set()
                 with get_session_with_current_tenant() as db_session:
                     handler_config = replace(
                         _build_handler_config(config, db_session),

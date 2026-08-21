@@ -25,6 +25,7 @@ from onyx.onyxbot.mattermost.config import (
     load_mattermost_bot_config_from_env,
     redacted_mattermost_bot_env,
 )
+from onyx.onyxbot.mattermost.models import MattermostListenerStatus
 from onyx.onyxbot.mattermost.run import get_application
 
 _REQUIRED_ENV = {
@@ -33,6 +34,18 @@ _REQUIRED_ENV = {
     MATTERMOST_BOT_PERSONA_ID_ENV: "7",
     MATTERMOST_BOT_USER_ID_ENV: "bot_user_1",
 }
+
+
+def _publish_connected_status(kwargs: dict[str, object]) -> None:
+    """Publish a connected listener status the way the real _run_bot does."""
+    status_sink = kwargs.get("status_sink")
+    assert callable(status_sink)
+    status_sink(
+        MattermostListenerStatus(
+            connected=True,
+            last_connected_at=time.monotonic(),
+        )
+    )
 
 
 def test_canonical_instance_id_is_stable_and_installation_specific() -> None:
@@ -153,7 +166,7 @@ def test_startup_fails_when_listener_exits_before_ready() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
-    async def stopped_runner(*_args: object) -> None:
+    async def stopped_runner(*_args: object, **_kwargs: object) -> None:
         return
 
     with (
@@ -170,9 +183,10 @@ def test_health_becomes_unavailable_when_listener_exits() -> None:
         config = load_mattermost_bot_config_from_env()
     stop_listener = threading.Event()
 
-    async def stopped_runner(*args: object) -> None:
+    async def stopped_runner(*args: object, **kwargs: object) -> None:
         ready_event = args[1]
         assert isinstance(ready_event, asyncio.Event)
+        _publish_connected_status(kwargs)
         ready_event.set()
         while not stop_listener.is_set():
             await asyncio.sleep(0.001)
@@ -197,7 +211,7 @@ def test_startup_fails_when_listener_initialization_fails() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
-    async def failing_runner(*_args: object) -> None:
+    async def failing_runner(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("listener initialization failed")
 
     with (
@@ -213,9 +227,10 @@ def test_health_is_ready_only_while_listener_is_running() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
-    async def running_runner(*args: object) -> None:
+    async def running_runner(*args: object, **kwargs: object) -> None:
         ready_event = args[1]
         assert isinstance(ready_event, asyncio.Event)
+        _publish_connected_status(kwargs)
         ready_event.set()
         await asyncio.Event().wait()
 

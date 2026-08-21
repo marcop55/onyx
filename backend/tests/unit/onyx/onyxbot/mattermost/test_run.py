@@ -536,3 +536,62 @@ def _event(channel_id: str) -> NormalizedMattermostEvent:
         raw_event_type="posted",
         dedupe_key=f"event:{channel_id}",
     )
+
+
+def test_health_snapshot_is_ok_while_connected() -> None:
+    status = run.MattermostListenerStatus(connected=True, last_connected_at=10.0)
+
+    status_code, payload = run.listener_health_snapshot(
+        status, now=11.0, unhealthy_after_seconds=60
+    )
+
+    assert status_code == 200
+    assert payload["status"] == "ok"
+
+
+def test_health_snapshot_stays_ok_inside_the_grace_window() -> None:
+    status = run.MattermostListenerStatus(
+        connected=False,
+        last_connected_at=10.0,
+        last_disconnected_at=100.0,
+        consecutive_failures=2,
+        last_error="connection dropped",
+    )
+
+    status_code, payload = run.listener_health_snapshot(
+        status, now=140.0, unhealthy_after_seconds=60
+    )
+
+    assert status_code == 200
+    assert payload["status"] == "reconnecting"
+    assert payload["last_error"] == "connection dropped"
+
+
+def test_health_snapshot_fails_after_the_grace_window() -> None:
+    status = run.MattermostListenerStatus(
+        connected=False,
+        last_connected_at=10.0,
+        last_disconnected_at=100.0,
+        consecutive_failures=9,
+        last_error="Invalid or expired session",
+    )
+
+    status_code, payload = run.listener_health_snapshot(
+        status, now=161.0, unhealthy_after_seconds=60
+    )
+
+    assert status_code == 503
+    assert payload["status"] == "disconnected"
+    assert payload["consecutive_failures"] == 9
+    assert payload["last_error"] == "Invalid or expired session"
+
+
+def test_health_snapshot_reports_not_ready_before_the_first_connect() -> None:
+    status = run.MattermostListenerStatus()
+
+    status_code, payload = run.listener_health_snapshot(
+        status, now=1.0, unhealthy_after_seconds=60
+    )
+
+    assert status_code == 503
+    assert payload["status"] == "not_ready"
