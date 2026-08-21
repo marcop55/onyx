@@ -189,6 +189,46 @@ def fetch_mattermost_channel_configs(
     return list(db_session.scalars(stmt).all())
 
 
+def _fetch_enabled_mattermost_bot(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+) -> MattermostBot | None:
+    return db_session.scalar(
+        select(MattermostBot).where(
+            MattermostBot.url == instance_id,
+            MattermostBot.bot_user_id == bot_user_id,
+            MattermostBot.enabled.is_(True),
+        )
+    )
+
+
+def fetch_mattermost_channel_config_for_channel(
+    db_session: Session,
+    *,
+    instance_id: str,
+    bot_user_id: str,
+    channel_id: str,
+) -> MattermostChannelConfig | None:
+    """Return the channel's own enabled config row, never the bot default.
+
+    A None result means the channel has not been opted in to bot answers.
+    """
+    bot = _fetch_enabled_mattermost_bot(
+        db_session, instance_id=instance_id, bot_user_id=bot_user_id
+    )
+    if bot is None:
+        return None
+    return db_session.scalar(
+        select(MattermostChannelConfig).where(
+            MattermostChannelConfig.mattermost_bot_id == bot.id,
+            MattermostChannelConfig.channel_id == channel_id,
+            MattermostChannelConfig.enabled.is_(True),
+        )
+    )
+
+
 def fetch_mattermost_channel_config_for_bot_and_channel(
     db_session: Session,
     *,
@@ -196,12 +236,8 @@ def fetch_mattermost_channel_config_for_bot_and_channel(
     bot_user_id: str,
     channel_id: str,
 ) -> MattermostChannelConfig | None:
-    bot = db_session.scalar(
-        select(MattermostBot).where(
-            MattermostBot.url == instance_id,
-            MattermostBot.bot_user_id == bot_user_id,
-            MattermostBot.enabled.is_(True),
-        )
+    bot = _fetch_enabled_mattermost_bot(
+        db_session, instance_id=instance_id, bot_user_id=bot_user_id
     )
     if bot is None:
         return None

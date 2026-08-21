@@ -22,10 +22,12 @@ MATTERMOST_BOT_PORT_ENV = "MATTERMOST_BOT_PORT"
 MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS_ENV = "MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS"
 MATTERMOST_MUTATION_GATEWAY_FACTORY_ENV = "MATTERMOST_MUTATION_GATEWAY_FACTORY"
 MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV = "MATTERMOST_SLASH_COMMAND_TOKEN"
+MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV = "MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS"
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8091
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
+_DEFAULT_UNHEALTHY_AFTER_SECONDS = 60
 _DEFAULT_BOT_MENTIONS = frozenset({"@onyx"})
 
 _SECRET_ENV_VARS = frozenset(
@@ -65,6 +67,7 @@ class MattermostBotConfig:
     request_timeout_seconds: int = _DEFAULT_REQUEST_TIMEOUT_SECONDS
     mutation_gateway_factory: str | None = None
     slash_command_bootstrap_token: str | None = None
+    unhealthy_after_seconds: int = _DEFAULT_UNHEALTHY_AFTER_SECONDS
 
 
 def load_mattermost_bot_config_from_env() -> MattermostBotConfig:
@@ -96,6 +99,10 @@ def load_mattermost_bot_config_from_env() -> MattermostBotConfig:
             MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS_ENV,
             _DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ),
+        unhealthy_after_seconds=_int_env(
+            MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV,
+            _DEFAULT_UNHEALTHY_AFTER_SECONDS,
+        ),
         mutation_gateway_factory=_env(MATTERMOST_MUTATION_GATEWAY_FACTORY_ENV),
         slash_command_bootstrap_token=_env(
             MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV
@@ -121,6 +128,7 @@ def redacted_mattermost_bot_env() -> dict[str, str]:
         MATTERMOST_BOT_REQUEST_TIMEOUT_SECONDS_ENV,
         MATTERMOST_MUTATION_GATEWAY_FACTORY_ENV,
         MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV,
+        MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV,
     ]
     redacted: dict[str, str] = {}
     for name in names:

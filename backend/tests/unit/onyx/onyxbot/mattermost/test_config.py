@@ -4,8 +4,9 @@ import asyncio
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +17,7 @@ from onyx.onyxbot.mattermost.config import (
     MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV,
     MATTERMOST_BOT_PERSONA_ID_ENV,
     MATTERMOST_BOT_TOKEN_ENV,
+    MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV,
     MATTERMOST_BOT_URL_ENV,
     MATTERMOST_BOT_USER_ID_ENV,
     MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV,
@@ -24,6 +26,7 @@ from onyx.onyxbot.mattermost.config import (
     load_mattermost_bot_config_from_env,
     redacted_mattermost_bot_env,
 )
+from onyx.onyxbot.mattermost.models import MattermostListenerStatus
 from onyx.onyxbot.mattermost.run import get_application
 
 _REQUIRED_ENV = {
@@ -32,6 +35,19 @@ _REQUIRED_ENV = {
     MATTERMOST_BOT_PERSONA_ID_ENV: "7",
     MATTERMOST_BOT_USER_ID_ENV: "bot_user_1",
 }
+
+
+def _publish_connected_status(kwargs: dict[str, object]) -> None:
+    """Publish a connected listener status the way the real _run_bot does."""
+    status_sink = kwargs.get("status_sink")
+    assert callable(status_sink)
+    publish = cast(Callable[[MattermostListenerStatus], None], status_sink)
+    publish(
+        MattermostListenerStatus(
+            connected=True,
+            last_connected_at=time.monotonic(),
+        )
+    )
 
 
 def test_canonical_instance_id_is_stable_and_installation_specific() -> None:
@@ -152,7 +168,7 @@ def test_startup_fails_when_listener_exits_before_ready() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
-    async def stopped_runner(*_args: object) -> None:
+    async def stopped_runner(*_args: object, **_kwargs: object) -> None:
         return
 
     with (
@@ -169,9 +185,10 @@ def test_health_becomes_unavailable_when_listener_exits() -> None:
         config = load_mattermost_bot_config_from_env()
     stop_listener = threading.Event()
 
-    async def stopped_runner(*args: object) -> None:
+    async def stopped_runner(*args: object, **kwargs: object) -> None:
         ready_event = args[1]
         assert isinstance(ready_event, asyncio.Event)
+        _publish_connected_status(kwargs)
         ready_event.set()
         while not stop_listener.is_set():
             await asyncio.sleep(0.001)
@@ -196,7 +213,7 @@ def test_startup_fails_when_listener_initialization_fails() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
-    async def failing_runner(*_args: object) -> None:
+    async def failing_runner(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("listener initialization failed")
 
     with (
@@ -212,9 +229,10 @@ def test_health_is_ready_only_while_listener_is_running() -> None:
     with _mattermost_env(_REQUIRED_ENV):
         config = load_mattermost_bot_config_from_env()
 
-    async def running_runner(*args: object) -> None:
+    async def running_runner(*args: object, **kwargs: object) -> None:
         ready_event = args[1]
         assert isinstance(ready_event, asyncio.Event)
+        _publish_connected_status(kwargs)
         ready_event.set()
         await asyncio.Event().wait()
 
@@ -237,3 +255,28 @@ def test_mattermost_bot_service_exposes_health_route() -> None:
     assert "/health" in route_paths
     assert "/commands/orka" in route_paths
     assert "/commands/orka/{action_name}" in route_paths
+
+
+def test_unhealthy_after_seconds_defaults_to_sixty() -> None:
+    with _mattermost_env(_REQUIRED_ENV):
+        config = load_mattermost_bot_config_from_env()
+
+    assert config.unhealthy_after_seconds == 60
+
+
+def test_unhealthy_after_seconds_reads_the_env_override() -> None:
+    with _mattermost_env(
+        {**_REQUIRED_ENV, MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV: "5"}
+    ):
+        config = load_mattermost_bot_config_from_env()
+
+    assert config.unhealthy_after_seconds == 5
+
+
+def test_unhealthy_after_seconds_is_reported_in_redacted_env() -> None:
+    with _mattermost_env(
+        {**_REQUIRED_ENV, MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV: "5"}
+    ):
+        redacted = redacted_mattermost_bot_env()
+
+    assert redacted[MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV] == "5"

@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from onyx.db.mattermost_bot import (
     fetch_mattermost_channel_config_for_bot_and_channel,
+    fetch_mattermost_channel_config_for_channel,
 )
 from onyx.onyxbot.mattermost.handler import (
     MattermostHandlerConfig,
@@ -235,3 +236,56 @@ def _event(*, text: str) -> NormalizedMattermostEvent:
         raw_event_type="posted",
         dedupe_key="event_id:post-root-1",
     )
+
+
+def test_fetch_channel_config_for_channel_does_not_fall_back_to_default() -> None:
+    db_session = MagicMock()
+    scalar_calls = 0
+
+    def scalar(_stmt: object) -> object | None:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        if scalar_calls == 1:
+            return SimpleNamespace(id=1)
+        return None
+
+    db_session.scalar.side_effect = scalar
+
+    resolved = fetch_mattermost_channel_config_for_channel(
+        db_session,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+        channel_id="channel-1",
+    )
+
+    assert resolved is None
+    assert scalar_calls == 2
+
+
+def test_fetch_channel_config_for_channel_returns_the_channel_row() -> None:
+    channel_config = SimpleNamespace(id=5, channel_config={"respond_tag_only": True})
+    db_session = MagicMock()
+    db_session.scalar.side_effect = [SimpleNamespace(id=1), channel_config]
+
+    resolved = fetch_mattermost_channel_config_for_channel(
+        db_session,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+        channel_id="channel-1",
+    )
+
+    assert resolved is channel_config
+
+
+def test_fetch_channel_config_for_channel_returns_none_without_an_enabled_bot() -> None:
+    db_session = MagicMock()
+    db_session.scalar.side_effect = [None]
+
+    resolved = fetch_mattermost_channel_config_for_channel(
+        db_session,
+        instance_id="https://mattermost.example.test",
+        bot_user_id="bot-user-1",
+        channel_id="channel-1",
+    )
+
+    assert resolved is None

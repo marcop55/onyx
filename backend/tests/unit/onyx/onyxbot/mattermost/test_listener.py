@@ -19,6 +19,7 @@ from onyx.onyxbot.mattermost.models import (
     MattermostListenerConfig,
     MattermostNormalizedEventType,
     MattermostPost,
+    MattermostReaction,
     MattermostUserInfo,
 )
 
@@ -857,6 +858,10 @@ async def test_listener_authorizes_events_with_current_membership(
             allowed_channel_ids=frozenset(),
             allowed_team_ids=frozenset(),
             approved_user_ids=frozenset(),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
         ),
     )
 
@@ -955,6 +960,10 @@ def test_empty_emergency_restrictions_do_not_reject_valid_members() -> None:
             allowed_channel_ids=frozenset(),
             allowed_team_ids=frozenset(),
             approved_user_ids=frozenset(),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
         )
     )
 
@@ -1027,3 +1036,207 @@ async def test_listener_reconnect_uses_bounded_backoff() -> None:
 
     assert event.event_type == MattermostNormalizedEventType.CHANNEL_MENTION
     assert sleeps == [1.0, 2.0]
+
+
+def _opted_out_config() -> MattermostListenerConfig:
+    """Config whose managed resolver reports no row for any channel."""
+    return _config(
+        allowed_channel_ids=frozenset(),
+        allowed_team_ids=frozenset(),
+        root_post_channel_ids=frozenset(),
+        managed_channel_config_resolver=lambda _channel_id: None,
+    )
+
+
+def test_unconfigured_channel_ignores_unmentioned_root_post() -> None:
+    normalizer = MattermostEventNormalizer(_opted_out_config())
+
+    event = normalizer.normalize(
+        _posted_event(post_id="post_new_1", message="who owns the runbook")
+    )
+
+    assert event is None
+
+
+def test_unconfigured_channel_ignores_mentions() -> None:
+    normalizer = MattermostEventNormalizer(_opted_out_config())
+
+    event = normalizer.normalize(
+        _posted_event(post_id="post_new_2", message="@onyx what changed?")
+    )
+
+    assert event is None
+
+
+def test_unconfigured_channel_ignores_thread_replies_in_owned_threads() -> None:
+    normalizer = MattermostEventNormalizer(_opted_out_config())
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_reply_1",
+            message="sounds good",
+            root_id="post_root_1",
+        )
+    )
+
+    assert event is None
+
+
+def test_direct_message_answered_without_any_channel_row() -> None:
+    normalizer = MattermostEventNormalizer(_opted_out_config())
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_dm_2",
+            message="help",
+            channel_id="dm_channel_1",
+            channel_type="D",
+            team_id="global",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.DIRECT_MESSAGE
+
+
+def test_direct_message_answered_when_env_allowlist_excludes_it() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            allowed_channel_ids=frozenset({"channel_1"}),
+            managed_channel_config_resolver=lambda _channel_id: None,
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(
+            post_id="post_dm_3",
+            message="help",
+            channel_id="dm_channel_1",
+            channel_type="D",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.DIRECT_MESSAGE
+
+
+def test_configured_channel_is_ignored_when_env_allowlist_excludes_it() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            allowed_channel_ids=frozenset({"channel_2"}),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": False,
+                "disabled": False,
+            },
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(post_id="post_bounded_1", message="summarize this")
+    )
+
+    assert event is None
+
+
+def test_disabled_channel_row_is_ignored() -> None:
+    normalizer = MattermostEventNormalizer(
+        _config(
+            root_post_channel_ids=frozenset(),
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": False,
+                "disabled": True,
+            },
+        )
+    )
+
+    event = normalizer.normalize(
+        _posted_event(post_id="post_disabled_1", message="@onyx what changed?")
+    )
+
+    assert event is None
+
+
+def test_reaction_feedback_accepted_without_a_channel_row() -> None:
+    normalizer = MattermostEventNormalizer(_opted_out_config())
+
+    event = normalizer.normalize(
+        MattermostEventEnvelope(
+            event="reaction_added",
+            channel_id="dm_channel_1",
+            channel_type="",
+            team_id="team_1",
+            user_id=_APPROVED_USER_ID,
+            reaction=MattermostReaction(
+                user_id=_APPROVED_USER_ID,
+                post_id="bot_answer_1",
+                emoji_name="+1",
+                channel_id="dm_channel_1",
+            ),
+            event_id="event_reaction_dm",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.REACTION_FEEDBACK
+
+
+def test_post_edit_retry_accepted_without_a_channel_row() -> None:
+    normalizer = MattermostEventNormalizer(_opted_out_config())
+
+    event = normalizer.normalize(
+        MattermostEventEnvelope(
+            event="post_edited",
+            channel_id="dm_channel_1",
+            channel_type="",
+            team_id="team_1",
+            user_id=_APPROVED_USER_ID,
+            post=MattermostPost(
+                id="post_root_1",
+                message="@onyx corrected question",
+                user_id=_APPROVED_USER_ID,
+                channel_id="dm_channel_1",
+            ),
+            event_id="event_edit_dm",
+        )
+    )
+
+    assert event is not None
+    assert event.event_type == MattermostNormalizedEventType.POST_UPDATE_RETRY
+
+
+@pytest.mark.asyncio
+async def test_listener_status_tracks_connect_and_failure() -> None:
+    ticks = iter([10.0, 11.0, 12.0, 13.0, 14.0])
+
+    async def record_sleep(_seconds: float) -> None:
+        return None
+
+    envelope = _posted_event(
+        post_id="post_root_1",
+        message="@onyx what changed?",
+        event_id="event_after_reconnect",
+    )
+    listener = MattermostEventListener(
+        _FlakyClient(envelope),
+        _config(
+            initial_reconnect_backoff_seconds=1.0,
+            max_reconnect_backoff_seconds=3.0,
+            managed_channel_config_resolver=lambda _channel_id: {
+                "respond_tag_only": True,
+                "disabled": False,
+            },
+        ),
+        sleep=record_sleep,
+        clock=lambda: next(ticks),
+    )
+
+    assert listener.status.connected is False
+    assert listener.status.consecutive_failures == 0
+
+    event = await anext(listener.normalized_events())
+
+    assert event is not None
+    assert listener.status.connected is True
+    assert listener.status.consecutive_failures == 0
+    assert listener.status.last_connected_at is not None
+    assert listener.status.last_error == "connection dropped"

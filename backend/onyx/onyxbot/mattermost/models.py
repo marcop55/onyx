@@ -130,6 +130,17 @@ class MattermostListenerConfig:
         object.__setattr__(self, "bot_user_ids", frozenset(bot_user_ids))
 
 
+@dataclass
+class MattermostListenerStatus:
+    """Mutable connection state for liveness reporting."""
+
+    connected: bool = False
+    last_connected_at: float | None = None
+    last_disconnected_at: float | None = None
+    consecutive_failures: int = 0
+    last_error: str | None = None
+
+
 @dataclass(frozen=True)
 class NormalizedMattermostEvent:
     """Mattermost event ready for Onyx handling."""
