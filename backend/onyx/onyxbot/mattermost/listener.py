@@ -81,9 +81,6 @@ class MattermostEventNormalizer:
         text = post.message
 
         if envelope.event == "posted":
-            if not self._is_allowed_channel(team_id, channel_id):
-                return None
-
             if envelope.channel_type == "D":
                 return self._build_event(
                     MattermostNormalizedEventType.DIRECT_MESSAGE,
@@ -96,6 +93,10 @@ class MattermostEventNormalizer:
                     text=text,
                     session_key=f"mattermost:dm:{team_id}:{channel_id}",
                 )
+
+            channel_config = self._resolve_channel_participation(team_id, channel_id)
+            if channel_config is None:
+                return None
 
             if post.root_id and post.root_id in self._config.tombstoned_thread_root_ids:
                 return None
@@ -124,7 +125,9 @@ class MattermostEventNormalizer:
                     text=self._strip_bot_mention(text),
                 )
 
-            if not post.root_id and self._allows_unmentioned_root_post(channel_id):
+            if not post.root_id and self._allows_unmentioned_root_post(
+                channel_config, channel_id
+            ):
                 return self._build_channel_event(
                     MattermostNormalizedEventType.ROOT_ALLOWLISTED_POST,
                     envelope,
@@ -136,9 +139,6 @@ class MattermostEventNormalizer:
                     text=text,
                 )
 
-            return None
-
-        if not self._is_allowed_channel(team_id, channel_id):
             return None
 
         if envelope.event == "post_edited":
@@ -190,7 +190,7 @@ class MattermostEventNormalizer:
 
         team_id = envelope.team_id or "global"
         channel_id = envelope.channel_id or reaction.channel_id
-        if not channel_id or not self._is_allowed_channel(team_id, channel_id):
+        if not channel_id:
             return None
 
         root_post_id = self._config.owned_answer_post_root_ids.get(reaction.post_id)
@@ -280,16 +280,35 @@ class MattermostEventNormalizer:
             dedupe_key=self._dedupe_key(envelope),
         )
 
-    def _is_allowed_channel(self, team_id: str, channel_id: str) -> bool:
+    def _resolve_channel_participation(
+        self, team_id: str, channel_id: str
+    ) -> dict[str, object] | None:
+        """Return a channel's managed config, or None when it is not opted in.
+
+        Channels are default-deny: answering requires the channel's own enabled
+        config row. Direct messages never reach this check.
+        """
+        if (
+            self._config.allowed_team_ids
+            and team_id not in self._config.allowed_team_ids
+        ):
+            return None
         if (
             self._config.allowed_channel_ids
             and channel_id not in self._config.allowed_channel_ids
         ):
-            return False
-        return (
-            not self._config.allowed_team_ids
-            or team_id in self._config.allowed_team_ids
-        )
+            return None
+
+        resolver = self._config.managed_channel_config_resolver
+        if resolver is None:
+            if channel_id not in self._config.allowed_channel_ids:
+                return None
+            return {}
+
+        channel_config = resolver(channel_id)
+        if channel_config is None or channel_config.get("disabled") is True:
+            return None
+        return channel_config
 
     def _is_approved_user(self, user_id: str) -> bool:
         return (
@@ -297,15 +316,12 @@ class MattermostEventNormalizer:
             or user_id in self._config.approved_user_ids
         )
 
-    def _allows_unmentioned_root_post(self, channel_id: str) -> bool:
-        if self._config.managed_channel_config_resolver is not None:
-            channel_config = self._config.managed_channel_config_resolver(channel_id)
-            if channel_config is not None:
-                if channel_config.get("disabled") is True:
-                    return False
-                respond_tag_only = channel_config.get("respond_tag_only")
-                if respond_tag_only is not None:
-                    return respond_tag_only is False
+    def _allows_unmentioned_root_post(
+        self, channel_config: dict[str, object], channel_id: str
+    ) -> bool:
+        respond_tag_only = channel_config.get("respond_tag_only")
+        if respond_tag_only is not None:
+            return respond_tag_only is False
         return channel_id in self._config.root_post_channel_ids
 
     def _mentions_bot(self, text: str) -> bool:
