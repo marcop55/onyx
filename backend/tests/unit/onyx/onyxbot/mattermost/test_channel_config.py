@@ -242,7 +242,7 @@ def test_fetch_channel_config_for_channel_does_not_fall_back_to_default() -> Non
     db_session = MagicMock()
     scalar_calls = 0
 
-    def scalar(stmt: object) -> object | None:
+    def scalar(_stmt: object) -> object | None:
         nonlocal scalar_calls
         scalar_calls += 1
         if scalar_calls == 1:

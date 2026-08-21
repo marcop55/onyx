@@ -4,8 +4,9 @@ import asyncio
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -14,9 +15,9 @@ from starlette.routing import Route
 
 from onyx.onyxbot.mattermost.config import (
     MATTERMOST_BOT_ALLOWED_CHANNEL_IDS_ENV,
-    MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV,
     MATTERMOST_BOT_PERSONA_ID_ENV,
     MATTERMOST_BOT_TOKEN_ENV,
+    MATTERMOST_BOT_UNHEALTHY_AFTER_SECONDS_ENV,
     MATTERMOST_BOT_URL_ENV,
     MATTERMOST_BOT_USER_ID_ENV,
     MATTERMOST_SLASH_COMMAND_BOOTSTRAP_TOKEN_ENV,
@@ -40,7 +41,8 @@ def _publish_connected_status(kwargs: dict[str, object]) -> None:
     """Publish a connected listener status the way the real _run_bot does."""
     status_sink = kwargs.get("status_sink")
     assert callable(status_sink)
-    status_sink(
+    publish = cast(Callable[[MattermostListenerStatus], None], status_sink)
+    publish(
         MattermostListenerStatus(
             connected=True,
             last_connected_at=time.monotonic(),
