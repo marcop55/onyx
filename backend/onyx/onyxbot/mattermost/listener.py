@@ -112,8 +112,7 @@ class MattermostEventNormalizer:
                     text=text,
                 )
 
-            stripped_text = self._strip_bot_mention(text)
-            if stripped_text != text:
+            if self._mentions_bot(text):
                 return self._build_channel_event(
                     MattermostNormalizedEventType.CHANNEL_MENTION,
                     envelope,
@@ -122,7 +121,7 @@ class MattermostEventNormalizer:
                     team_id=team_id,
                     channel_id=channel_id,
                     root_post_id=root_post_id,
-                    text=stripped_text,
+                    text=self._strip_bot_mention(text),
                 )
 
             if not post.root_id and self._allows_unmentioned_root_post(channel_id):
@@ -309,14 +308,20 @@ class MattermostEventNormalizer:
                     return respond_tag_only is False
         return channel_id in self._config.root_post_channel_ids
 
+    def _mentions_bot(self, text: str) -> bool:
+        """Report whether the text actually addresses the bot by mention."""
+        return any(
+            re.search(_bot_mention_pattern(mention), text, flags=re.IGNORECASE)
+            for mention in self._config.bot_mentions
+        )
+
     def _strip_bot_mention(self, text: str) -> str:
         updated_text = text
         for mention in sorted(
             self._config.bot_mentions, key=lambda value: len(value), reverse=True
         ):
-            escaped_mention = re.escape(mention)
             updated_text = re.sub(
-                rf"(?<!\w){escaped_mention}(?!\w)",
+                _bot_mention_pattern(mention),
                 " ",
                 updated_text,
                 flags=re.IGNORECASE,
@@ -357,6 +362,10 @@ class MattermostEventNormalizer:
             return False
         self._seen_event_ids.move_to_end(dedupe_key)
         return True
+
+
+def _bot_mention_pattern(mention: str) -> str:
+    return rf"(?<!\w){re.escape(mention)}(?!\w)"
 
 
 def _feedback_action_from_emoji(emoji_name: str) -> QAFeedbackType | None:
